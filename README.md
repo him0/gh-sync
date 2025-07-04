@@ -56,6 +56,10 @@ Pushing to origin...
 - If merge conflicts occur, you'll need to resolve them manually
 - The extension uses the default branch of the upstream repository (main or master)
 
+## Acknowledgments
+
+This project is inspired by [hub](https://github.com/mislav/hub)'s `sync` command. While hub provides a comprehensive set of GitHub CLI features, gh-sync focuses solely on the fork synchronization functionality as a standalone GitHub CLI extension.
+
 ## License
 
 MIT
