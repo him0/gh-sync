@@ -17,6 +17,12 @@ GitHub CLI Extension to sync your fork with its upstream repository.
 gh extension install him0/gh-sync
 ```
 
+### Upgrade
+
+```bash
+gh extension upgrade gh-sync
+```
+
 ## Usage
 
 ```bash

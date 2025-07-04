@@ -31,6 +31,12 @@ func main() {
 	// Parse command line flags
 	flag.BoolVar(&verbose, "verbose", false, "verbose output")
 	flag.StringVar(&colorFlag, "color", "auto", "colorize output (always, never, auto)")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "\nOptions:\n")
+		fmt.Fprintf(os.Stderr, "  --verbose\n        verbose output\n")
+		fmt.Fprintf(os.Stderr, "  --color string\n        colorize output (always, never, auto) (default \"auto\")\n")
+	}
 	flag.Parse()
 
 	// Set up color output
