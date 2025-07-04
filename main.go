@@ -1,20 +1,18 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"github.com/mattn/go-isatty"
 )
 
-type repoInfo struct {
-	Parent struct {
-		Owner string `json:"owner"`
-		Name  string `json:"name"`
-	} `json:"parent"`
+type Remote struct {
+	Name string
+	URL  string
 }
 
 var (
@@ -22,7 +20,6 @@ var (
 	lightGreen = "\033[32;1m"
 	red        = "\033[31m"
 	lightRed   = "\033[31;1m"
-	yellow     = "\033[33m"
 	resetColor = "\033[0m"
 )
 
@@ -33,64 +30,49 @@ func main() {
 		lightGreen = ""
 		red = ""
 		lightRed = ""
-		yellow = ""
 		resetColor = ""
 	}
 
 	// Check if current directory is a git repository
 	if err := checkGitRepo(); err != nil {
-		exitWithError("Not a git repository")
+		exitWithError("fatal: Not a git repository")
 	}
 
-	// Get parent repository info
-	parent, err := getParentRepo()
+	// Get main remote (first available in priority order: upstream, github, origin)
+	remote, err := getMainRemote()
 	if err != nil {
-		exitWithError("Failed to get repository info: %v", err)
-	}
-	if parent.Parent.Owner == "" || parent.Parent.Name == "" {
-		exitWithError("This repository is not a fork")
+		exitWithError(err.Error())
 	}
 
-	upstreamURL := fmt.Sprintf("https://github.com/%s/%s.git", parent.Parent.Owner, parent.Parent.Name)
-	fmt.Printf("Parent repository: %s%s/%s%s\n", lightGreen, parent.Parent.Owner, parent.Parent.Name, resetColor)
-
-	// Check and setup upstream remote
-	if err := setupUpstream(upstreamURL); err != nil {
-		exitWithError("Failed to setup upstream: %v", err)
-	}
+	// Get default branch for the remote
+	defaultBranch := getDefaultBranch(remote)
 
 	// Get current branch
-	currentBranch, err := getCurrentBranch()
+	currentBranch := ""
+	if branch, err := getCurrentBranch(); err == nil {
+		currentBranch = branch
+	}
+
+	// Fetch from remote
+	if err := runGitSilent("fetch", "--prune", "--quiet", "--progress", remote.Name); err != nil {
+		exitWithError("Failed to fetch from %s", remote.Name)
+	}
+
+	// Get branch to remote mapping
+	branchToRemote := getBranchToRemoteMapping()
+
+	// Get all local branches
+	branches, err := getLocalBranches()
 	if err != nil {
-		exitWithError("Failed to get current branch: %v", err)
-	}
-	if currentBranch != "main" && currentBranch != "master" {
-		fmt.Printf("%sWarning: You are on branch '%s', not 'main' or 'master'%s\n", yellow, currentBranch, resetColor)
+		exitWithError("Failed to get local branches")
 	}
 
-	// Fetch from upstream
-	fmt.Printf("Fetching from upstream...\n")
-	if err := runGit("fetch", "upstream"); err != nil {
-		exitWithError("Failed to fetch from upstream: %v", err)
+	// Process each branch
+	fullDefaultBranch := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, defaultBranch)
+	
+	for _, branch := range branches {
+		processBranch(branch, remote, branchToRemote, currentBranch, defaultBranch, fullDefaultBranch)
 	}
-
-	// Detect default branch
-	defaultBranch := detectDefaultBranch()
-	fmt.Printf("Default branch: %s%s%s\n", lightGreen, defaultBranch, resetColor)
-
-	// Merge upstream default branch
-	fmt.Printf("Merging upstream/%s...\n", defaultBranch)
-	if err := runGit("merge", fmt.Sprintf("upstream/%s", defaultBranch)); err != nil {
-		exitWithError("Failed to merge upstream/%s: %v", defaultBranch, err)
-	}
-
-	// Push to origin
-	fmt.Printf("Pushing to origin...\n")
-	if err := runGit("push", "origin", currentBranch); err != nil {
-		exitWithError("Failed to push to origin: %v", err)
-	}
-
-	fmt.Printf("%s✓ Successfully synced with upstream%s\n", green, resetColor)
 }
 
 func checkGitRepo() error {
@@ -100,43 +82,87 @@ func checkGitRepo() error {
 	return cmd.Run()
 }
 
-func getParentRepo() (repoInfo, error) {
-	var info repoInfo
-	cmd := exec.Command("gh", "repo", "view", "--json", "parent")
-	output, err := cmd.Output()
+func getMainRemote() (*Remote, error) {
+	// Priority order: upstream, github, origin, others
+	priorityOrder := []string{"upstream", "github", "origin"}
+	
+	remotes, err := getRemotes()
 	if err != nil {
-		return info, err
+		return nil, err
 	}
-
-	if err := json.Unmarshal(output, &info); err != nil {
-		return info, err
+	
+	if len(remotes) == 0 {
+		return nil, fmt.Errorf("no git remotes found")
 	}
-
-	return info, nil
+	
+	// Check priority remotes first
+	for _, priority := range priorityOrder {
+		for _, remote := range remotes {
+			if remote.Name == priority {
+				return &remote, nil
+			}
+		}
+	}
+	
+	// Return first remote if no priority match
+	return &remotes[0], nil
 }
 
-func setupUpstream(upstreamURL string) error {
-	// Check existing upstream
-	cmd := exec.Command("git", "remote", "get-url", "upstream")
-	existingURL, err := cmd.Output()
-	if err == nil {
-		// Upstream already exists
-		existing := strings.TrimSpace(string(existingURL))
-		if existing != upstreamURL {
-			fmt.Printf("Updating upstream URL from %s to %s\n", existing, upstreamURL)
-			return runGit("remote", "set-url", "upstream", upstreamURL)
-		}
-		fmt.Printf("Upstream already configured: %s\n", existing)
-		return nil
+func getRemotes() ([]Remote, error) {
+	cmd := exec.Command("git", "remote", "-v")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
 	}
+	
+	remoteMap := make(map[string]string)
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) >= 2 && strings.HasSuffix(line, "(fetch)") {
+			remoteMap[parts[0]] = parts[1]
+		}
+	}
+	
+	var remotes []Remote
+	for name, url := range remoteMap {
+		remotes = append(remotes, Remote{Name: name, URL: url})
+	}
+	
+	return remotes, nil
+}
 
-	// Add upstream if it doesn't exist
-	fmt.Printf("Adding upstream remote: %s\n", upstreamURL)
-	return runGit("remote", "add", "upstream", upstreamURL)
+func getDefaultBranch(remote *Remote) string {
+	// Try to get symbolic ref for remote HEAD first
+	cmd := exec.Command("git", "symbolic-ref", fmt.Sprintf("refs/remotes/%s/HEAD", remote.Name))
+	output, err := cmd.Output()
+	if err == nil {
+		ref := strings.TrimSpace(string(output))
+		prefix := fmt.Sprintf("refs/remotes/%s/", remote.Name)
+		if strings.HasPrefix(ref, prefix) {
+			return strings.TrimPrefix(ref, prefix)
+		}
+	}
+	
+	// Check if main branch exists on remote
+	cmd = exec.Command("git", "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/remotes/%s/main", remote.Name))
+	if cmd.Run() == nil {
+		return "main"
+	}
+	
+	// Check if master branch exists on remote
+	cmd = exec.Command("git", "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/remotes/%s/master", remote.Name))
+	if cmd.Run() == nil {
+		return "master"
+	}
+	
+	// Default to main (modern default)
+	return "main"
 }
 
 func getCurrentBranch() (string, error) {
-	cmd := exec.Command("git", "branch", "--show-current")
+	cmd := exec.Command("git", "symbolic-ref", "--short", "HEAD")
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -144,39 +170,144 @@ func getCurrentBranch() (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-func detectDefaultBranch() string {
-	// Check upstream/HEAD
-	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/upstream/HEAD")
+func getBranchToRemoteMapping() map[string]string {
+	branchToRemote := make(map[string]string)
+	
+	cmd := exec.Command("git", "config", "--get-regexp", "^branch\\..*\\.remote$")
 	output, err := cmd.Output()
-	if err == nil {
-		branch := strings.TrimSpace(string(output))
-		if strings.HasPrefix(branch, "refs/remotes/upstream/") {
-			return strings.TrimPrefix(branch, "refs/remotes/upstream/")
+	if err != nil {
+		return branchToRemote
+	}
+	
+	configRe := regexp.MustCompile(`^branch\.(.+?)\.remote (.+)`)
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	
+	for _, line := range lines {
+		if matches := configRe.FindStringSubmatch(line); len(matches) > 0 {
+			branchToRemote[matches[1]] = matches[2]
 		}
 	}
-
-	// Check if main branch exists
-	if runGit("show-ref", "--verify", "--quiet", "refs/remotes/upstream/main") == nil {
-		return "main"
-	}
-
-	// Check if master branch exists
-	if runGit("show-ref", "--verify", "--quiet", "refs/remotes/upstream/master") == nil {
-		return "master"
-	}
-
-	// Default to main
-	return "main"
+	
+	return branchToRemote
 }
 
-func runGit(args ...string) error {
+func getLocalBranches() ([]string, error) {
+	cmd := exec.Command("git", "branch", "--format=%(refname:short)")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	var branches []string
+	for _, line := range lines {
+		branch := strings.TrimSpace(line)
+		if branch != "" {
+			branches = append(branches, branch)
+		}
+	}
+	
+	return branches, nil
+}
+
+func processBranch(branch string, remote *Remote, branchToRemote map[string]string, currentBranch, defaultBranch, fullDefaultBranch string) {
+	fullBranch := fmt.Sprintf("refs/heads/%s", branch)
+	remoteBranch := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, branch)
+	gone := false
+	
+	// Check if branch has upstream configuration
+	if branchToRemote[branch] == remote.Name {
+		cmd := exec.Command("git", "rev-parse", "--symbolic-full-name", fmt.Sprintf("%s@{upstream}", branch))
+		output, err := cmd.Output()
+		if err == nil {
+			remoteBranch = strings.TrimSpace(string(output))
+		} else {
+			remoteBranch = ""
+			gone = true
+		}
+	} else if !hasRemoteBranch(remoteBranch) {
+		remoteBranch = ""
+	}
+	
+	if remoteBranch != "" {
+		// Branch has corresponding remote branch
+		if ahead, behind, err := getCommitDifference(fullBranch, remoteBranch); err == nil {
+			if ahead == 0 && behind == 0 {
+				// Branches are identical, do nothing
+				return
+			} else if ahead == 0 && behind > 0 {
+				// Local branch is behind, can fast-forward
+				oldCommit := getCommitSHA(fullBranch)
+				if branch == currentBranch {
+					runGitSilent("merge", "--ff-only", "--quiet", remoteBranch)
+				} else {
+					runGitSilent("update-ref", fullBranch, remoteBranch)
+				}
+				fmt.Printf("%sUpdated branch %s%s%s (was %s).\n", green, lightGreen, branch, resetColor, oldCommit[:7])
+			} else {
+				// Local branch has unpushed commits
+				fmt.Fprintf(os.Stderr, "warning: '%s' seems to contain unpushed commits\n", branch)
+			}
+		}
+	} else if gone {
+		// Remote branch was deleted
+		if ahead, behind, err := getCommitDifference(fullBranch, fullDefaultBranch); err == nil {
+			if ahead == 0 && behind >= 0 {
+				// Branch is ancestor of default branch, safe to delete
+				oldCommit := getCommitSHA(fullBranch)
+				if branch == currentBranch {
+					runGitSilent("checkout", "--quiet", defaultBranch)
+				}
+				runGitSilent("branch", "-D", branch)
+				fmt.Printf("%sDeleted branch %s%s%s (was %s).\n", red, lightRed, branch, resetColor, oldCommit[:7])
+			} else {
+				// Branch appears not merged
+				fmt.Fprintf(os.Stderr, "warning: '%s' was deleted on %s, but appears not merged into '%s'\n", branch, remote.Name, defaultBranch)
+			}
+		}
+	}
+}
+
+func hasRemoteBranch(remoteBranch string) bool {
+	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", remoteBranch)
+	return cmd.Run() == nil
+}
+
+func getCommitDifference(branch1, branch2 string) (ahead, behind int, err error) {
+	// Get commits ahead
+	cmd := exec.Command("git", "rev-list", "--count", fmt.Sprintf("%s..%s", branch2, branch1))
+	output, err := cmd.Output()
+	if err != nil {
+		return 0, 0, err
+	}
+	fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &ahead)
+	
+	// Get commits behind
+	cmd = exec.Command("git", "rev-list", "--count", fmt.Sprintf("%s..%s", branch1, branch2))
+	output, err = cmd.Output()
+	if err != nil {
+		return 0, 0, err
+	}
+	fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &behind)
+	
+	return ahead, behind, nil
+}
+
+func getCommitSHA(ref string) string {
+	cmd := exec.Command("git", "rev-parse", ref)
+	output, err := cmd.Output()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func runGitSilent(args ...string) error {
 	cmd := exec.Command("git", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 func exitWithError(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, "%sError: %s%s\n", lightRed, fmt.Sprintf(format, args...), resetColor)
+	fmt.Fprintf(os.Stderr, "%s%s%s\n", lightRed, fmt.Sprintf(format, args...), resetColor)
 	os.Exit(1)
 }
