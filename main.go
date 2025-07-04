@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,16 +21,26 @@ var (
 	lightGreen = "\033[32;1m"
 	red        = "\033[31m"
 	lightRed   = "\033[31;1m"
+	magenta    = "\033[35m"
 	resetColor = "\033[0m"
+	verbose    bool
+	colorFlag  string
 )
 
 func main() {
+	// Parse command line flags
+	flag.BoolVar(&verbose, "verbose", false, "verbose output")
+	flag.StringVar(&colorFlag, "color", "auto", "colorize output (always, never, auto)")
+	flag.Parse()
+
 	// Set up color output
-	if !isatty.IsTerminal(os.Stdout.Fd()) {
+	colorize := colorizeOutput()
+	if !colorize {
 		green = ""
 		lightGreen = ""
 		red = ""
 		lightRed = ""
+		magenta = ""
 		resetColor = ""
 	}
 
@@ -303,8 +314,32 @@ func getCommitSHA(ref string) string {
 }
 
 func runGitSilent(args ...string) error {
+	verboseLog("git", args)
 	cmd := exec.Command("git", args...)
 	return cmd.Run()
+}
+
+func verboseLog(cmd string, args []string) {
+	if verbose {
+		msg := fmt.Sprintf("$ %s %s", cmd, strings.Join(args, " "))
+		if isatty.IsTerminal(os.Stderr.Fd()) && magenta != "" {
+			msg = fmt.Sprintf("%s%s%s", magenta, msg, resetColor)
+		}
+		fmt.Fprintln(os.Stderr, msg)
+	}
+}
+
+func colorizeOutput() bool {
+	switch colorFlag {
+	case "always":
+		return true
+	case "never":
+		return false
+	case "auto":
+		return isatty.IsTerminal(os.Stdout.Fd())
+	default:
+		return isatty.IsTerminal(os.Stdout.Fd())
+	}
 }
 
 func exitWithError(format string, args ...interface{}) {
