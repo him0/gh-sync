@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+            name: gh-sync-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            name: gh-sync-darwin-arm64
+          - goos: linux
+            goarch: amd64
+            name: gh-sync-linux-amd64
+          - goos: linux
+            goarch: arm64
+            name: gh-sync-linux-arm64
+          - goos: windows
+            goarch: amd64
+            name: gh-sync-windows-amd64.exe
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+      
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go mod download
+          go build -o ${{ matrix.name }} -ldflags="-s -w" .
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+
+  release:
+    name: Create release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+      
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./artifacts/*/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
