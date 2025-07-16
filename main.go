@@ -88,7 +88,7 @@ func main() {
 	fullDefaultBranch := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, defaultBranch)
 	
 	for _, branch := range branches {
-		processBranch(branch, remote, branchToRemote, currentBranch, defaultBranch, fullDefaultBranch)
+		processBranch(branch, remote, branchToRemote, &currentBranch, defaultBranch, fullDefaultBranch)
 	}
 }
 
@@ -227,7 +227,7 @@ func getLocalBranches() ([]string, error) {
 	return branches, nil
 }
 
-func processBranch(branch string, remote *Remote, branchToRemote map[string]string, currentBranch, defaultBranch, fullDefaultBranch string) {
+func processBranch(branch string, remote *Remote, branchToRemote map[string]string, currentBranch *string, defaultBranch, fullDefaultBranch string) {
 	fullBranch := fmt.Sprintf("refs/heads/%s", branch)
 	remoteBranch := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, branch)
 	gone := false
@@ -255,7 +255,7 @@ func processBranch(branch string, remote *Remote, branchToRemote map[string]stri
 			} else if ahead == 0 && behind > 0 {
 				// Local branch is behind, can fast-forward
 				oldCommit := getCommitSHA(fullBranch)
-				if branch == currentBranch {
+				if branch == *currentBranch {
 					runGitSilent("merge", "--ff-only", "--quiet", remoteBranch)
 				} else {
 					runGitSilent("update-ref", fullBranch, remoteBranch)
@@ -272,8 +272,9 @@ func processBranch(branch string, remote *Remote, branchToRemote map[string]stri
 			if ahead == 0 && behind >= 0 {
 				// Branch is ancestor of default branch, safe to delete
 				oldCommit := getCommitSHA(fullBranch)
-				if branch == currentBranch {
+				if branch == *currentBranch {
 					runGitSilent("checkout", "--quiet", defaultBranch)
+					*currentBranch = defaultBranch
 				}
 				runGitSilent("branch", "-D", branch)
 				fmt.Printf("%sDeleted branch %s%s%s (was %s).\n", red, lightRed, branch, resetColor, oldCommit[:7])
