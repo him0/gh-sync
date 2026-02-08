@@ -4,30 +4,32 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestColorizeOutput(t *testing.T) {
 	tests := []struct {
-		name     string
-		flag     string
-		wantTrue bool // true means "always returns true", false means "always returns false"
-		exact    bool // if true, check exact value; if false, skip (for "auto" which depends on terminal)
+		name string
+		flag string
+		want bool
 	}{
-		{"always", "always", true, true},
-		{"never", "never", false, true},
+		{"always", "always", true},
+		{"never", "never", false},
 		// "auto" depends on whether stdout is a terminal; in tests it is not
-		{"auto_in_test", "auto", false, true},
+		{"auto_in_test", "auto", false},
 		// unknown values fall through to auto behavior
-		{"unknown_in_test", "typo", false, true},
+		{"unknown_in_test", "typo", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			oldFlag := colorFlag
+			defer func() { colorFlag = oldFlag }()
 			colorFlag = tt.flag
 			got := colorizeOutput()
-			if tt.exact && got != tt.wantTrue {
-				t.Errorf("colorizeOutput() with flag=%q = %v, want %v", tt.flag, got, tt.wantTrue)
+			if got != tt.want {
+				t.Errorf("colorizeOutput() with flag=%q = %v, want %v", tt.flag, got, tt.want)
 			}
 		})
 	}
@@ -58,6 +60,7 @@ func setupTestRepo(t *testing.T) string {
 func TestGetCommitDifference(t *testing.T) {
 	dir := setupTestRepo(t)
 
+	// NOTE: os.Chdir mutates process-global state, so this test must not use t.Parallel().
 	origDir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +87,7 @@ func TestGetCommitDifference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defaultBranch := "refs/heads/" + string(branchOut[:len(branchOut)-1])
+	defaultBranch := "refs/heads/" + strings.TrimSpace(string(branchOut))
 
 	// Create feature branch and add 2 commits
 	run("git", "checkout", "-b", "feature")
@@ -120,6 +123,7 @@ func TestGetCommitDifference(t *testing.T) {
 func TestGetDefaultBranch(t *testing.T) {
 	dir := setupTestRepo(t)
 
+	// NOTE: os.Chdir mutates process-global state, so this test must not use t.Parallel().
 	origDir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
