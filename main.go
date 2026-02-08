@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/mattn/go-isatty"
@@ -255,12 +256,17 @@ func processBranch(branch string, remote *Remote, branchToRemote map[string]stri
 			} else if ahead == 0 && behind > 0 {
 				// Local branch is behind, can fast-forward
 				oldCommit := getCommitSHA(fullBranch)
+				var updateErr error
 				if branch == *currentBranch {
-					runGitSilent("merge", "--ff-only", "--quiet", remoteBranch)
+					updateErr = runGitSilent("merge", "--ff-only", "--quiet", remoteBranch)
 				} else {
-					runGitSilent("update-ref", fullBranch, remoteBranch)
+					updateErr = runGitSilent("update-ref", fullBranch, remoteBranch)
 				}
-				fmt.Printf("%sUpdated branch %s%s%s (was %s).\n", green, lightGreen, branch, resetColor, oldCommit[:7])
+				if updateErr != nil {
+					fmt.Fprintf(os.Stderr, "warning: couldn't fast-forward '%s'\n", branch)
+				} else {
+					fmt.Printf("%sUpdated branch %s%s%s (was %s).\n", green, lightGreen, branch, resetColor, oldCommit[:7])
+				}
 			} else {
 				// Local branch has unpushed commits
 				fmt.Fprintf(os.Stderr, "warning: '%s' seems to contain unpushed commits\n", branch)
@@ -273,11 +279,17 @@ func processBranch(branch string, remote *Remote, branchToRemote map[string]stri
 				// Branch is ancestor of default branch, safe to delete
 				oldCommit := getCommitSHA(fullBranch)
 				if branch == *currentBranch {
-					runGitSilent("checkout", "--quiet", defaultBranch)
+					if err := runGitSilent("checkout", "--quiet", defaultBranch); err != nil {
+						fmt.Fprintf(os.Stderr, "warning: couldn't checkout '%s'\n", defaultBranch)
+						return
+					}
 					*currentBranch = defaultBranch
 				}
-				runGitSilent("branch", "-D", branch)
-				fmt.Printf("%sDeleted branch %s%s%s (was %s).\n", red, lightRed, branch, resetColor, oldCommit[:7])
+				if err := runGitSilent("branch", "-D", branch); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: couldn't delete '%s'\n", branch)
+				} else {
+					fmt.Printf("%sDeleted branch %s%s%s (was %s).\n", red, lightRed, branch, resetColor, oldCommit[:7])
+				}
 			} else {
 				// Branch appears not merged
 				fmt.Fprintf(os.Stderr, "warning: '%s' was deleted on %s, but appears not merged into '%s'\n", branch, remote.Name, defaultBranch)
@@ -298,16 +310,22 @@ func getCommitDifference(branch1, branch2 string) (ahead, behind int, err error)
 	if err != nil {
 		return 0, 0, err
 	}
-	fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &ahead)
-	
+	ahead, err = strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to parse ahead count: %w", err)
+	}
+
 	// Get commits behind
 	cmd = exec.Command("git", "rev-list", "--count", fmt.Sprintf("%s..%s", branch1, branch2))
 	output, err = cmd.Output()
 	if err != nil {
 		return 0, 0, err
 	}
-	fmt.Sscanf(strings.TrimSpace(string(output)), "%d", &behind)
-	
+	behind, err = strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to parse behind count: %w", err)
+	}
+
 	return ahead, behind, nil
 }
 
