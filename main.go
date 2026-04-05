@@ -132,22 +132,22 @@ func getRemotes() ([]Remote, error) {
 	if err != nil {
 		return nil, err
 	}
-	
-	remoteMap := make(map[string]string)
+
+	seen := make(map[string]bool)
+	var remotes []Remote
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	
+
 	for _, line := range lines {
 		parts := strings.Fields(line)
 		if len(parts) >= 2 && strings.HasSuffix(line, "(fetch)") {
-			remoteMap[parts[0]] = parts[1]
+			name := parts[0]
+			if !seen[name] {
+				seen[name] = true
+				remotes = append(remotes, Remote{Name: name, URL: parts[1]})
+			}
 		}
 	}
-	
-	var remotes []Remote
-	for name, url := range remoteMap {
-		remotes = append(remotes, Remote{Name: name, URL: url})
-	}
-	
+
 	return remotes, nil
 }
 
