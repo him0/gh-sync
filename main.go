@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"os"
@@ -341,7 +342,19 @@ func getCommitSHA(ref string) string {
 func runGitSilent(args ...string) error {
 	verboseLog("git", args)
 	cmd := exec.Command("git", args...)
-	return cmd.Run()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if verbose && msg != "" {
+			fmt.Fprintln(os.Stderr, msg)
+		}
+		if msg != "" {
+			return fmt.Errorf("%w: %s", err, msg)
+		}
+	}
+	return err
 }
 
 func verboseLog(cmd string, args []string) {
