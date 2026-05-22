@@ -18,15 +18,37 @@ type Remote struct {
 	URL  string
 }
 
+// colorConfig holds ANSI color codes used for terminal output. When colorization
+// is disabled, all fields are empty strings, so formatting code emits no escape
+// sequences without any branching at call sites.
+type colorConfig struct {
+	green      string
+	lightGreen string
+	red        string
+	lightRed   string
+	magenta    string
+	reset      string
+}
+
+// newColorConfig returns a colorConfig populated with ANSI codes when enabled
+// is true, or a zero-value config (all empty strings) when disabled.
+func newColorConfig(enabled bool) colorConfig {
+	if !enabled {
+		return colorConfig{}
+	}
+	return colorConfig{
+		green:      "\033[32m",
+		lightGreen: "\033[32;1m",
+		red:        "\033[31m",
+		lightRed:   "\033[31;1m",
+		magenta:    "\033[35m",
+		reset:      "\033[0m",
+	}
+}
+
 var (
-	green      = "\033[32m"
-	lightGreen = "\033[32;1m"
-	red        = "\033[31m"
-	lightRed   = "\033[31;1m"
-	magenta    = "\033[35m"
-	resetColor = "\033[0m"
-	verbose    bool
-	colorFlag  string
+	verbose   bool
+	colorFlag string
 )
 
 func main() {
@@ -42,25 +64,17 @@ func main() {
 	flag.Parse()
 
 	// Set up color output
-	colorize := colorizeOutput()
-	if !colorize {
-		green = ""
-		lightGreen = ""
-		red = ""
-		lightRed = ""
-		magenta = ""
-		resetColor = ""
-	}
+	colors := newColorConfig(colorizeOutput(colorFlag))
 
 	// Check if current directory is a git repository
 	if err := checkGitRepo(); err != nil {
-		exitWithError("fatal: Not a git repository")
+		exitWithError(colors, "fatal: Not a git repository")
 	}
 
 	// Get main remote (first available in priority order: upstream, github, origin)
 	remote, err := getMainRemote()
 	if err != nil {
-		exitWithError(err.Error())
+		exitWithError(colors, err.Error())
 	}
 
 	// Get default branch for the remote
@@ -73,8 +87,8 @@ func main() {
 	}
 
 	// Fetch from remote
-	if err := runGitSilent("fetch", "--prune", "--quiet", "--progress", remote.Name); err != nil {
-		exitWithError("Failed to fetch from %s", remote.Name)
+	if err := runGitSilent(colors, "fetch", "--prune", "--quiet", "--progress", remote.Name); err != nil {
+		exitWithError(colors, "Failed to fetch from %s", remote.Name)
 	}
 
 	// Get branch to remote mapping
@@ -83,14 +97,14 @@ func main() {
 	// Get all local branches
 	branches, err := getLocalBranches()
 	if err != nil {
-		exitWithError("Failed to get local branches")
+		exitWithError(colors, "Failed to get local branches")
 	}
 
 	// Process each branch
 	fullDefaultBranch := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, defaultBranch)
-	
+
 	for _, branch := range branches {
-		processBranch(branch, remote, branchToRemote, &currentBranch, defaultBranch, fullDefaultBranch)
+		processBranch(colors, branch, remote, branchToRemote, &currentBranch, defaultBranch, fullDefaultBranch)
 	}
 }
 
@@ -104,16 +118,16 @@ func checkGitRepo() error {
 func getMainRemote() (*Remote, error) {
 	// Priority order: upstream, github, origin, others
 	priorityOrder := []string{"upstream", "github", "origin"}
-	
+
 	remotes, err := getRemotes()
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if len(remotes) == 0 {
 		return nil, fmt.Errorf("no git remotes found")
 	}
-	
+
 	// Check priority remotes first
 	for _, priority := range priorityOrder {
 		for _, remote := range remotes {
@@ -122,7 +136,7 @@ func getMainRemote() (*Remote, error) {
 			}
 		}
 	}
-	
+
 	// Return first remote if no priority match
 	return &remotes[0], nil
 }
@@ -163,19 +177,19 @@ func getDefaultBranch(remote *Remote) string {
 			return strings.TrimPrefix(ref, prefix)
 		}
 	}
-	
+
 	// Check if main branch exists on remote
 	cmd = exec.Command("git", "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/remotes/%s/main", remote.Name))
 	if cmd.Run() == nil {
 		return "main"
 	}
-	
+
 	// Check if master branch exists on remote
 	cmd = exec.Command("git", "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/remotes/%s/master", remote.Name))
 	if cmd.Run() == nil {
 		return "master"
 	}
-	
+
 	// Default to main (modern default)
 	return "main"
 }
@@ -191,22 +205,22 @@ func getCurrentBranch() (string, error) {
 
 func getBranchToRemoteMapping() map[string]string {
 	branchToRemote := make(map[string]string)
-	
+
 	cmd := exec.Command("git", "config", "--get-regexp", "^branch\\..*\\.remote$")
 	output, err := cmd.Output()
 	if err != nil {
 		return branchToRemote
 	}
-	
+
 	configRe := regexp.MustCompile(`^branch\.(.+?)\.remote (.+)`)
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	
+
 	for _, line := range lines {
 		if matches := configRe.FindStringSubmatch(line); len(matches) > 0 {
 			branchToRemote[matches[1]] = matches[2]
 		}
 	}
-	
+
 	return branchToRemote
 }
 
@@ -216,7 +230,7 @@ func getLocalBranches() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 	var branches []string
 	for _, line := range lines {
@@ -225,15 +239,15 @@ func getLocalBranches() ([]string, error) {
 			branches = append(branches, branch)
 		}
 	}
-	
+
 	return branches, nil
 }
 
-func processBranch(branch string, remote *Remote, branchToRemote map[string]string, currentBranch *string, defaultBranch, fullDefaultBranch string) {
+func processBranch(colors colorConfig, branch string, remote *Remote, branchToRemote map[string]string, currentBranch *string, defaultBranch, fullDefaultBranch string) {
 	fullBranch := fmt.Sprintf("refs/heads/%s", branch)
 	remoteBranch := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, branch)
 	gone := false
-	
+
 	// Check if branch has upstream configuration
 	if branchToRemote[branch] == remote.Name {
 		cmd := exec.Command("git", "rev-parse", "--symbolic-full-name", fmt.Sprintf("%s@{upstream}", branch))
@@ -247,7 +261,7 @@ func processBranch(branch string, remote *Remote, branchToRemote map[string]stri
 	} else if !hasRemoteBranch(remoteBranch) {
 		remoteBranch = ""
 	}
-	
+
 	if remoteBranch != "" {
 		// Branch has corresponding remote branch
 		if ahead, behind, err := getCommitDifference(fullBranch, remoteBranch); err == nil {
@@ -259,14 +273,14 @@ func processBranch(branch string, remote *Remote, branchToRemote map[string]stri
 				oldCommit := getCommitSHA(fullBranch)
 				var updateErr error
 				if branch == *currentBranch {
-					updateErr = runGitSilent("merge", "--ff-only", "--quiet", remoteBranch)
+					updateErr = runGitSilent(colors, "merge", "--ff-only", "--quiet", remoteBranch)
 				} else {
-					updateErr = runGitSilent("update-ref", fullBranch, remoteBranch)
+					updateErr = runGitSilent(colors, "update-ref", fullBranch, remoteBranch)
 				}
 				if updateErr != nil {
 					fmt.Fprintf(os.Stderr, "warning: couldn't fast-forward '%s'\n", branch)
 				} else {
-					fmt.Printf("%sUpdated branch %s%s%s (was %s).\n", green, lightGreen, branch, resetColor, oldCommit[:7])
+					fmt.Printf("%sUpdated branch %s%s%s (was %s).\n", colors.green, colors.lightGreen, branch, colors.reset, oldCommit[:7])
 				}
 			} else {
 				// Local branch has unpushed commits
@@ -280,16 +294,16 @@ func processBranch(branch string, remote *Remote, branchToRemote map[string]stri
 				// Branch is ancestor of default branch, safe to delete
 				oldCommit := getCommitSHA(fullBranch)
 				if branch == *currentBranch {
-					if err := runGitSilent("checkout", "--quiet", defaultBranch); err != nil {
+					if err := runGitSilent(colors, "checkout", "--quiet", defaultBranch); err != nil {
 						fmt.Fprintf(os.Stderr, "warning: couldn't checkout '%s'\n", defaultBranch)
 						return
 					}
 					*currentBranch = defaultBranch
 				}
-				if err := runGitSilent("branch", "-D", branch); err != nil {
+				if err := runGitSilent(colors, "branch", "-D", branch); err != nil {
 					fmt.Fprintf(os.Stderr, "warning: couldn't delete '%s'\n", branch)
 				} else {
-					fmt.Printf("%sDeleted branch %s%s%s (was %s).\n", red, lightRed, branch, resetColor, oldCommit[:7])
+					fmt.Printf("%sDeleted branch %s%s%s (was %s).\n", colors.red, colors.lightRed, branch, colors.reset, oldCommit[:7])
 				}
 			} else {
 				// Branch appears not merged
@@ -339,8 +353,8 @@ func getCommitSHA(ref string) string {
 	return strings.TrimSpace(string(output))
 }
 
-func runGitSilent(args ...string) error {
-	verboseLog("git", args)
+func runGitSilent(colors colorConfig, args ...string) error {
+	verboseLog(colors, "git", args)
 	cmd := exec.Command("git", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -357,18 +371,18 @@ func runGitSilent(args ...string) error {
 	return err
 }
 
-func verboseLog(cmd string, args []string) {
+func verboseLog(colors colorConfig, cmd string, args []string) {
 	if verbose {
 		msg := fmt.Sprintf("$ %s %s", cmd, strings.Join(args, " "))
-		if isatty.IsTerminal(os.Stderr.Fd()) && magenta != "" {
-			msg = fmt.Sprintf("%s%s%s", magenta, msg, resetColor)
+		if isatty.IsTerminal(os.Stderr.Fd()) && colors.magenta != "" {
+			msg = fmt.Sprintf("%s%s%s", colors.magenta, msg, colors.reset)
 		}
 		fmt.Fprintln(os.Stderr, msg)
 	}
 }
 
-func colorizeOutput() bool {
-	switch colorFlag {
+func colorizeOutput(flag string) bool {
+	switch flag {
 	case "always":
 		return true
 	case "never":
@@ -380,7 +394,7 @@ func colorizeOutput() bool {
 	}
 }
 
-func exitWithError(format string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, "%s%s%s\n", lightRed, fmt.Sprintf(format, args...), resetColor)
+func exitWithError(colors colorConfig, format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, "%s%s%s\n", colors.lightRed, fmt.Sprintf(format, args...), colors.reset)
 	os.Exit(1)
 }
