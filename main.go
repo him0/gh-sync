@@ -381,7 +381,7 @@ func runGitSilent(colors colorConfig, args ...string) error {
 func verboseLog(colors colorConfig, cmd string, args []string) {
 	if verbose {
 		msg := fmt.Sprintf("$ %s %s", cmd, strings.Join(args, " "))
-		if isatty.IsTerminal(os.Stderr.Fd()) && colors.magenta != "" {
+		if colors.magenta != "" {
 			msg = fmt.Sprintf("%s%s%s", colors.magenta, msg, colors.reset)
 		}
 		fmt.Fprintln(os.Stderr, msg)
