@@ -304,24 +304,23 @@ func hasRemoteBranch(remoteBranch string) bool {
 }
 
 func getCommitDifference(branch1, branch2 string) (ahead, behind int, err error) {
-	// Get commits ahead
-	cmd := exec.Command("git", "rev-list", "--count", fmt.Sprintf("%s..%s", branch2, branch1))
+	// Get ahead and behind counts in a single git call.
+	// For "branch1...branch2", --left-right --count outputs "<left>\t<right>",
+	// where left = commits only in branch1 (ahead) and right = commits only in branch2 (behind).
+	cmd := exec.Command("git", "rev-list", "--left-right", "--count", fmt.Sprintf("%s...%s", branch1, branch2))
 	output, err := cmd.Output()
 	if err != nil {
 		return 0, 0, err
 	}
-	ahead, err = strconv.Atoi(strings.TrimSpace(string(output)))
+	fields := strings.Fields(strings.TrimSpace(string(output)))
+	if len(fields) != 2 {
+		return 0, 0, fmt.Errorf("unexpected rev-list output: %q", string(output))
+	}
+	ahead, err = strconv.Atoi(fields[0])
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to parse ahead count: %w", err)
 	}
-
-	// Get commits behind
-	cmd = exec.Command("git", "rev-list", "--count", fmt.Sprintf("%s..%s", branch1, branch2))
-	output, err = cmd.Output()
-	if err != nil {
-		return 0, 0, err
-	}
-	behind, err = strconv.Atoi(strings.TrimSpace(string(output)))
+	behind, err = strconv.Atoi(fields[1])
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to parse behind count: %w", err)
 	}
