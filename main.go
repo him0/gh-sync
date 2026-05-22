@@ -63,6 +63,14 @@ func main() {
 	}
 	flag.Parse()
 
+	// Validate --color value
+	switch colorFlag {
+	case "always", "never", "auto":
+	default:
+		fmt.Fprintf(os.Stderr, "fatal: invalid --color value: %q (must be one of: always, never, auto)\n", colorFlag)
+		os.Exit(1)
+	}
+
 	// Set up color output
 	colors := newColorConfig(colorizeOutput(colorFlag))
 
