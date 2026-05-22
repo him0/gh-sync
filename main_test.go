@@ -24,15 +24,27 @@ func TestColorizeOutput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			oldFlag := colorFlag
-			defer func() { colorFlag = oldFlag }()
-			colorFlag = tt.flag
-			got := colorizeOutput()
+			got := colorizeOutput(tt.flag)
 			if got != tt.want {
-				t.Errorf("colorizeOutput() with flag=%q = %v, want %v", tt.flag, got, tt.want)
+				t.Errorf("colorizeOutput(%q) = %v, want %v", tt.flag, got, tt.want)
 			}
 		})
 	}
+}
+
+func TestNewColorConfig(t *testing.T) {
+	t.Run("enabled", func(t *testing.T) {
+		c := newColorConfig(true)
+		if c.green == "" || c.lightGreen == "" || c.red == "" || c.lightRed == "" || c.magenta == "" || c.reset == "" {
+			t.Errorf("newColorConfig(true) returned empty fields: %+v", c)
+		}
+	})
+	t.Run("disabled", func(t *testing.T) {
+		c := newColorConfig(false)
+		if c.green != "" || c.lightGreen != "" || c.red != "" || c.lightRed != "" || c.magenta != "" || c.reset != "" {
+			t.Errorf("newColorConfig(false) returned non-empty fields: %+v", c)
+		}
+	})
 }
 
 // setupTestRepo creates a temporary git repo and returns its path and a cleanup function.
