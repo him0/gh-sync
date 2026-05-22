@@ -1,10 +1,8 @@
 package main
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -47,13 +45,18 @@ func TestNewColorConfig(t *testing.T) {
 	})
 }
 
-// setupTestRepo creates a temporary git repo and returns its path and a cleanup function.
+// setupTestRepo creates a temporary git repo and returns its path. The initial
+// branch is pinned to "main" so tests are independent of the developer's
+// global `init.defaultBranch` config.
 func setupTestRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 
 	cmds := [][]string{
-		{"git", "init"},
+		// -c init.defaultBranch is honored by `git init` on git 2.28+; for
+		// older versions, the env-style override still works because git
+		// resolves config before reading the subcommand.
+		{"git", "-c", "init.defaultBranch=main", "init"},
 		{"git", "config", "user.email", "test@test.com"},
 		{"git", "config", "user.name", "Test"},
 		{"git", "config", "commit.gpgsign", "false"},
@@ -71,18 +74,10 @@ func setupTestRepo(t *testing.T) string {
 
 func TestGetCommitDifference(t *testing.T) {
 	dir := setupTestRepo(t)
+	// t.Chdir restores the previous CWD on cleanup and serializes against
+	// other Chdir-using tests, so callers don't need to coordinate manually.
+	t.Chdir(dir)
 
-	// NOTE: os.Chdir mutates process-global state, so this test must not use t.Parallel().
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(origDir)
-
-	// Create a branch and add commits to diverge
 	run := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command(args[0], args[1:]...)
@@ -92,16 +87,8 @@ func TestGetCommitDifference(t *testing.T) {
 		}
 	}
 
-	// Get current branch name (main or master)
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = dir
-	branchOut, err := cmd.Output()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defaultBranch := "refs/heads/" + strings.TrimSpace(string(branchOut))
+	defaultBranch := "refs/heads/main"
 
-	// Create feature branch and add 2 commits
 	run("git", "checkout", "-b", "feature")
 	run("git", "commit", "--allow-empty", "-m", "feature-1")
 	run("git", "commit", "--allow-empty", "-m", "feature-2")
@@ -119,7 +106,6 @@ func TestGetCommitDifference(t *testing.T) {
 		t.Errorf("expected behind=0, got %d", behind)
 	}
 
-	// Check reverse direction
 	ahead, behind, err = getCommitDifference(defaultBranch, featureBranch)
 	if err != nil {
 		t.Fatalf("getCommitDifference() error: %v", err)
@@ -134,18 +120,8 @@ func TestGetCommitDifference(t *testing.T) {
 
 func TestGetDefaultBranch(t *testing.T) {
 	dir := setupTestRepo(t)
+	t.Chdir(dir)
 
-	// NOTE: os.Chdir mutates process-global state, so this test must not use t.Parallel().
-	origDir, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Chdir(origDir)
-
-	// Create a bare remote to simulate remote/HEAD
 	remoteDir := filepath.Join(t.TempDir(), "remote.git")
 	cmd := exec.Command("git", "clone", "--bare", dir, remoteDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -163,15 +139,45 @@ func TestGetDefaultBranch(t *testing.T) {
 
 	run("git", "remote", "add", "testremote", remoteDir)
 	run("git", "fetch", "testremote")
+	// `git fetch` does not create refs/remotes/<remote>/HEAD; without
+	// `set-head` the test would only exercise the main/master fallback paths.
+	run("git", "remote", "set-head", "testremote", "--auto")
 
 	remote := &Remote{Name: "testremote", URL: remoteDir}
 
-	// getDefaultBranch should find a branch (main or master depending on git version)
-	branch := getDefaultBranch(remote)
-	if branch == "" {
-		t.Error("getDefaultBranch() returned empty string")
+	branch, err := getDefaultBranch(remote)
+	if err != nil {
+		t.Fatalf("getDefaultBranch() error: %v", err)
 	}
-	if branch != "main" && branch != "master" {
-		t.Errorf("getDefaultBranch() = %q, expected 'main' or 'master'", branch)
+	if branch != "main" {
+		t.Errorf("getDefaultBranch() = %q, want %q", branch, "main")
+	}
+}
+
+func TestGetDefaultBranchMissingRemote(t *testing.T) {
+	dir := setupTestRepo(t)
+	t.Chdir(dir)
+
+	// Remote configured but with no fetched refs — neither symbolic-ref nor
+	// show-ref of main/master will succeed.
+	remote := &Remote{Name: "ghost", URL: ""}
+	if _, err := getDefaultBranch(remote); err == nil {
+		t.Error("getDefaultBranch() with no remote refs: want error, got nil")
+	}
+}
+
+func TestShortSHA(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"", "unknown"},
+		{"abc", "abc"},
+		{"abcdef0", "abcdef0"},
+		{"abcdef01234567", "abcdef0"},
+	}
+	for _, tt := range tests {
+		if got := shortSHA(tt.in); got != tt.want {
+			t.Errorf("shortSHA(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
