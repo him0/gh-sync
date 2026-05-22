@@ -52,6 +52,12 @@ var (
 )
 
 func main() {
+	if err := run(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	// Parse command line flags
 	flag.BoolVar(&verbose, "verbose", false, "verbose output")
 	flag.StringVar(&colorFlag, "color", "auto", "colorize output (always, never, auto)")
@@ -68,7 +74,7 @@ func main() {
 	case "always", "never", "auto":
 	default:
 		fmt.Fprintf(os.Stderr, "fatal: invalid --color value: %q (must be one of: always, never, auto)\n", colorFlag)
-		os.Exit(1)
+		return fmt.Errorf("invalid --color value")
 	}
 
 	// Set up color output
@@ -76,13 +82,15 @@ func main() {
 
 	// Check if current directory is a git repository
 	if err := checkGitRepo(); err != nil {
-		exitWithError(colors, "fatal: Not a git repository")
+		printError(colors, "fatal: Not a git repository")
+		return err
 	}
 
 	// Get main remote (first available in priority order: upstream, github, origin)
 	remote, err := getMainRemote()
 	if err != nil {
-		exitWithError(colors, err.Error())
+		printError(colors, "%s", err.Error())
+		return err
 	}
 
 	// Get default branch for the remote
@@ -96,7 +104,8 @@ func main() {
 
 	// Fetch from remote
 	if err := runGitSilent(colors, "fetch", "--prune", "--quiet", "--progress", remote.Name); err != nil {
-		exitWithError(colors, "Failed to fetch from %s", remote.Name)
+		printError(colors, "Failed to fetch from %s", remote.Name)
+		return err
 	}
 
 	// Get branch to remote mapping
@@ -105,7 +114,8 @@ func main() {
 	// Get all local branches
 	branches, err := getLocalBranches()
 	if err != nil {
-		exitWithError(colors, "Failed to get local branches")
+		printError(colors, "Failed to get local branches")
+		return err
 	}
 
 	// Process each branch
@@ -114,6 +124,8 @@ func main() {
 	for _, branch := range branches {
 		processBranch(colors, branch, remote, branchToRemote, &currentBranch, defaultBranch, fullDefaultBranch)
 	}
+
+	return nil
 }
 
 func checkGitRepo() error {
@@ -401,7 +413,6 @@ func colorizeOutput(flag string) bool {
 	}
 }
 
-func exitWithError(colors colorConfig, format string, args ...interface{}) {
+func printError(colors colorConfig, format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "%s%s%s\n", colors.lightRed, fmt.Sprintf(format, args...), colors.reset)
-	os.Exit(1)
 }
