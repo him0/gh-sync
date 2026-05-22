@@ -38,6 +38,7 @@ ehthumbs.db
 Thumbs.db
 
 # Temporary files
+.cache/
 *.tmp
 *.bak
 *.backup
