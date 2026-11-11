@@ -42,6 +42,7 @@ go mod tidy
   - `always`: Always colorize output (both stdout and stderr, even if `NO_COLOR` is set)
   - `never`: Never colorize output
   - `auto`: Colorize each stream only when it is a terminal (default). stdout messages (e.g. `Updated branch ...`) follow stdout, errors and verbose logs follow stderr, so `gh sync | grep Updated` emits no escape sequences. Color is disabled when the `NO_COLOR` environment variable is set (`--color=always` still forces it)
+- `--version`: Print the version and exit (`dev` unless built by the release workflow)
 
 ## Architecture
 
@@ -82,10 +83,15 @@ Actions used by the workflows are pinned to verified commits in `.github/workflo
 
 ## Release Process
 
-GitHub Actions workflow (`.github/workflows/release.yml`) builds cross-platform binaries when a version tag is pushed:
+GitHub Actions workflow (`.github/workflows/release.yml`) uses [`cli/gh-extension-precompile`](https://github.com/cli/gh-extension-precompile) to build cross-platform binaries and publish a release (with generated release notes) when a version tag is pushed:
 - Darwin (amd64, arm64)
-- Linux (amd64, arm64)  
-- Windows (amd64)
+- FreeBSD (386, amd64, arm64)
+- Linux (386, amd64, arm, arm64)
+- Windows (386, amd64, arm64)
+
+Assets are named `<os>-<arch>[.exe]`, and tags containing `-` (e.g. `v1.0.0-rc.1`) are published as prereleases.
+
+The tag name is embedded into the binary through `go_build_options` (`-X main.version=<tag>`) and reported by `--version`. The action already passes `-ldflags="-s -w"` and the last `-ldflags` wins, so `go_build_options` must stay a single `-ldflags=...` argument that repeats `-s -w`.
 
 To release a new version:
 ```bash
