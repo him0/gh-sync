@@ -8,9 +8,17 @@ gh-sync is a GitHub CLI extension that synchronizes a forked repository with its
 
 ## Build and Development Commands
 
+Tasks are defined in `mise.toml` (tool versions are managed by mise; Go build/module caches live in `.cache/` inside the repository).
+
 ```bash
 # Build the binary
-go build -o gh-sync .
+mise run build
+
+# Run tests
+mise run test
+
+# Run go vet and check gofmt
+mise run lint
 
 # Run go mod tidy to update dependencies
 go mod tidy
