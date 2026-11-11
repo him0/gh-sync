@@ -36,23 +36,67 @@ func TestMain(m *testing.M) {
 
 func TestColorizeOutput(t *testing.T) {
 	tests := []struct {
-		name string
-		flag string
-		want bool
+		flag       string
+		isTerminal bool
+		noColor    bool
+		want       bool
 	}{
-		{"always", "always", true},
-		{"never", "never", false},
-		// "auto" depends on whether stdout is a terminal; in tests it is not
-		{"auto_in_test", "auto", false},
+		{"always", true, false, true},
+		{"always", false, false, true},
+		{"always", true, true, true},
+		{"always", false, true, true},
+		{"never", true, false, false},
+		{"never", false, false, false},
+		{"never", true, true, false},
+		{"never", false, true, false},
+		{"auto", true, false, true},
+		{"auto", false, false, false},
+		{"auto", true, true, false},
+		{"auto", false, true, false},
 		// unknown values fall through to auto behavior
-		{"unknown_in_test", "typo", false},
+		{"typo", true, false, true},
+		{"typo", false, false, false},
+	}
+
+	for _, tt := range tests {
+		name := fmt.Sprintf("%s/tty=%v/no_color=%v", tt.flag, tt.isTerminal, tt.noColor)
+		t.Run(name, func(t *testing.T) {
+			got := colorizeOutput(tt.flag, tt.isTerminal, tt.noColor)
+			if got != tt.want {
+				t.Errorf("colorizeOutput(%q, %v, %v) = %v, want %v", tt.flag, tt.isTerminal, tt.noColor, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestColorizeOutputPerStream checks that stdout and stderr are decided
+// independently, e.g. `gh sync | grep Updated` (stdout piped, stderr on a
+// terminal) must not leak escape sequences into stdout (issue #29).
+func TestColorizeOutputPerStream(t *testing.T) {
+	tests := []struct {
+		name                 string
+		flag                 string
+		stdoutTTY, stderrTTY bool
+		noColor              bool
+		wantStdout           bool
+		wantStderr           bool
+	}{
+		{"auto both tty", "auto", true, true, false, true, true},
+		{"auto stdout piped", "auto", false, true, false, false, true},
+		{"auto stderr piped", "auto", true, false, false, true, false},
+		{"auto both piped", "auto", false, false, false, false, false},
+		{"auto both tty NO_COLOR", "auto", true, true, true, false, false},
+		{"always stdout piped", "always", false, true, false, true, true},
+		{"always both piped NO_COLOR", "always", false, false, true, true, true},
+		{"never both tty", "never", true, true, false, false, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := colorizeOutput(tt.flag)
-			if got != tt.want {
-				t.Errorf("colorizeOutput(%q) = %v, want %v", tt.flag, got, tt.want)
+			gotStdout := colorizeOutput(tt.flag, tt.stdoutTTY, tt.noColor)
+			gotStderr := colorizeOutput(tt.flag, tt.stderrTTY, tt.noColor)
+			if gotStdout != tt.wantStdout || gotStderr != tt.wantStderr {
+				t.Errorf("stdout=%v stderr=%v, want stdout=%v stderr=%v", gotStdout, gotStderr, tt.wantStdout, tt.wantStderr)
 			}
 		})
 	}

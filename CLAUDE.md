@@ -39,9 +39,9 @@ go mod tidy
 
 - `--verbose`: Show git commands being executed (similar to hub's HUB_VERBOSE=1)
 - `--color[=WHEN]`: Control color output
-  - `always`: Always colorize output
-  - `never`: Never colorize output  
-  - `auto`: Colorize output only when stdout is a terminal (default)
+  - `always`: Always colorize output (both stdout and stderr, even if `NO_COLOR` is set)
+  - `never`: Never colorize output
+  - `auto`: Colorize each stream only when it is a terminal (default). stdout messages (e.g. `Updated branch ...`) follow stdout, errors and verbose logs follow stderr, so `gh sync | grep Updated` emits no escape sequences. Color is disabled when the `NO_COLOR` environment variable is set (`--color=always` still forces it)
 
 ## Architecture
 
@@ -52,13 +52,13 @@ The entire application is contained in a single `main.go` file with the followin
 - `getDefaultBranch()`: Determines the default branch (prefers main over master)
 - `runGitSilent()`: Wrapper for executing git commands with verbose logging support
 - `verboseLog()`: Logs git commands when --verbose flag is enabled
-- `colorizeOutput()`: Determines if color output should be enabled based on --color flag
+- `colorizeOutput()`: Decides whether one output stream should be colorized from the --color flag, that stream's TTY status and `NO_COLOR` (called separately for stdout and stderr)
 
 ## Key Implementation Details
 
 1. **Command Line Parsing**: Uses Go's `flag` package for --verbose and --color options
 2. **Verbose Logging**: Shows git commands in `$ git command args` format with magenta color
-3. **Color Output**: Uses ANSI escape codes with isatty detection for terminal-aware coloring
+3. **Color Output**: Uses ANSI escape codes with per-stream isatty detection (`runConfig` holds separate `stdoutColors` / `stderrColors`)
 4. **Default Branch Detection**: Checks remote/HEAD first, then tries main, then master, defaulting to main
 5. **Error Handling**: All errors exit with status code 1 and colored error messages to stderr
 

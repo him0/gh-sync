@@ -50,9 +50,15 @@ func newColorConfig(enabled bool) colorConfig {
 // runConfig bundles per-invocation settings so run() and its helpers stay
 // independent of package-level mutable state — making run() safely re-entrant
 // from tests.
+//
+// Colorization is resolved per output stream: stdoutColors is used for
+// messages written to stdout (e.g. "Updated branch ...") and stderrColors for
+// messages written to stderr (errors, verbose logs). This keeps ANSI escapes
+// out of a stream that is piped even when the other one is a terminal.
 type runConfig struct {
-	colors  colorConfig
-	verbose bool
+	stdoutColors colorConfig
+	stderrColors colorConfig
+	verbose      bool
 }
 
 func main() {
@@ -93,25 +99,27 @@ func run(args []string) error {
 		return fmt.Errorf("invalid --color value: %q", colorFlag)
 	}
 
+	_, noColor := os.LookupEnv("NO_COLOR")
 	cfg := runConfig{
-		colors:  newColorConfig(colorizeOutput(colorFlag)),
-		verbose: verbose,
+		stdoutColors: newColorConfig(colorizeOutput(colorFlag, isatty.IsTerminal(os.Stdout.Fd()), noColor)),
+		stderrColors: newColorConfig(colorizeOutput(colorFlag, isatty.IsTerminal(os.Stderr.Fd()), noColor)),
+		verbose:      verbose,
 	}
 
 	if err := checkGitRepo(); err != nil {
-		printError(cfg.colors, "fatal: Not a git repository")
+		printError(cfg.stderrColors, "fatal: Not a git repository")
 		return err
 	}
 
 	remote, err := getMainRemote()
 	if err != nil {
-		printError(cfg.colors, "%s", err.Error())
+		printError(cfg.stderrColors, "%s", err.Error())
 		return err
 	}
 
 	defaultBranch, err := getDefaultBranch(remote)
 	if err != nil {
-		printError(cfg.colors, "Failed to determine default branch for %s: %s", remote.Name, err.Error())
+		printError(cfg.stderrColors, "Failed to determine default branch for %s: %s", remote.Name, err.Error())
 		return err
 	}
 
@@ -121,19 +129,19 @@ func run(args []string) error {
 	}
 
 	if err := runGitSilent(cfg, "fetch", "--prune", "--quiet", "--progress", remote.Name); err != nil {
-		printError(cfg.colors, "Failed to fetch from %s: %s", remote.Name, err.Error())
+		printError(cfg.stderrColors, "Failed to fetch from %s: %s", remote.Name, err.Error())
 		return err
 	}
 
 	branchToRemote, err := getBranchToRemoteMapping()
 	if err != nil {
-		printError(cfg.colors, "Failed to read branch tracking config: %s", err.Error())
+		printError(cfg.stderrColors, "Failed to read branch tracking config: %s", err.Error())
 		return err
 	}
 
 	branches, err := getLocalBranches()
 	if err != nil {
-		printError(cfg.colors, "Failed to get local branches: %s", err.Error())
+		printError(cfg.stderrColors, "Failed to get local branches: %s", err.Error())
 		return err
 	}
 
@@ -384,7 +392,7 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 				fmt.Fprintf(os.Stderr, "warning: couldn't fast-forward '%s': %s\n", branch, updateErr.Error())
 				return updateErr
 			}
-			fmt.Printf("%sUpdated branch %s%s%s (was %s).\n", cfg.colors.green, cfg.colors.lightGreen, branch, cfg.colors.reset, shortSHA(oldCommit))
+			fmt.Printf("%sUpdated branch %s%s%s (was %s).\n", cfg.stdoutColors.green, cfg.stdoutColors.lightGreen, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
 		default:
 			fmt.Fprintf(os.Stderr, "warning: '%s' seems to contain unpushed commits\n", branch)
 		}
@@ -419,7 +427,7 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 		fmt.Fprintf(os.Stderr, "warning: couldn't delete '%s': %s\n", branch, err.Error())
 		return err
 	}
-	fmt.Printf("%sDeleted branch %s%s%s (was %s).\n", cfg.colors.red, cfg.colors.lightRed, branch, cfg.colors.reset, shortSHA(oldCommit))
+	fmt.Printf("%sDeleted branch %s%s%s (was %s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
 	return nil
 }
 
@@ -497,20 +505,23 @@ func runGitSilent(cfg runConfig, args ...string) error {
 func verboseLog(cfg runConfig, cmd string, args []string) {
 	if cfg.verbose {
 		msg := fmt.Sprintf("$ %s %s", cmd, strings.Join(args, " "))
-		if cfg.colors.magenta != "" {
-			msg = fmt.Sprintf("%s%s%s", cfg.colors.magenta, msg, cfg.colors.reset)
+		if cfg.stderrColors.magenta != "" {
+			msg = fmt.Sprintf("%s%s%s", cfg.stderrColors.magenta, msg, cfg.stderrColors.reset)
 		}
 		fmt.Fprintln(os.Stderr, msg)
 	}
 }
 
-// colorizeOutput resolves the effective colorization decision for terminal
-// output. Most of gh-sync's user-facing output (verboseLog, printError,
-// runGitSilent's stderr echo) writes to stderr, so "auto" is keyed on
-// stderr's TTY status. The NO_COLOR environment variable
-// (https://no-color.org) suppresses color when set to any value unless the
-// user explicitly opts in with --color=always.
-func colorizeOutput(flag string) bool {
+// colorizeOutput resolves whether a single output stream should be colorized.
+// isTerminal reports whether that stream is a terminal and noColor whether the
+// NO_COLOR environment variable (https://no-color.org) is set. run() calls it
+// once per stream (stdout and stderr) so each is decided independently.
+//
+//   - "always": colorize regardless of isTerminal and noColor.
+//   - "never":  never colorize.
+//   - "auto":   colorize only when the stream is a terminal and NO_COLOR is
+//     unset.
+func colorizeOutput(flag string, isTerminal, noColor bool) bool {
 	switch flag {
 	case "always":
 		return true
@@ -519,10 +530,7 @@ func colorizeOutput(flag string) bool {
 	default:
 		// "auto" and any unrecognized value behave the same; run() rejects
 		// unknown values before reaching here.
-		if _, noColor := os.LookupEnv("NO_COLOR"); noColor {
-			return false
-		}
-		return isatty.IsTerminal(os.Stderr.Fd())
+		return isTerminal && !noColor
 	}
 }
 
