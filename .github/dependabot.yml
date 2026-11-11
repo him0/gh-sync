@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Dependabot regenerates the matching entries in
+  # .github/workflows/actions.lock in the same PR as the `uses:` bump.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+    # Let fresh releases settle before picking them up.
+    cooldown:
+      default-days: 7

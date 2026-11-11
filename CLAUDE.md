@@ -70,6 +70,16 @@ GitHub Actions workflow (`.github/workflows/ci.yml`) runs on pushes to `main` an
 
 The Go version comes from `go.mod` (`go-version-file`), so bumping Go only requires updating `go.mod`.
 
+### Workflow lockfile
+
+Actions used by the workflows are pinned to verified commits in `.github/workflows/actions.lock`, and `.github/workflows/verify-lockfile.yml` fails CI when the lockfile is out of sync.
+
+- After adding a workflow or changing any `uses:` line, re-run `gh actions-lock` at the repository root and commit the updated `actions.lock` (requires an authenticated `gh` and `gh extension install github/gh-actions-lock`).
+- Never edit `actions.lock` by hand.
+- `gh actions-lock` narrows partial versions (`@v7`) to full tags (`@v7.0.1`); keep that form.
+- Use `gh actions-lock --relock` to advance a ref that moved upstream (after reviewing the upstream history).
+- Dependabot (`.github/dependabot.yml`) bumps actions weekly and regenerates the matching lockfile entries in the same PR.
+
 ## Release Process
 
 GitHub Actions workflow (`.github/workflows/release.yml`) builds cross-platform binaries when a version tag is pushed:
