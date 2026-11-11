@@ -14,6 +14,11 @@ import (
 	"github.com/mattn/go-isatty"
 )
 
+// version is the gh-sync version reported by --version. Release builds
+// override it at link time with -ldflags "-X main.version=<tag>" (see
+// .github/workflows/release.yml); other builds report "dev".
+var version = "dev"
+
 type Remote struct {
 	Name string
 	URL  string
@@ -77,19 +82,27 @@ func main() {
 func run(args []string) error {
 	fs := flag.NewFlagSet("gh-sync", flag.ContinueOnError)
 	var (
-		verbose   bool
-		colorFlag string
+		verbose     bool
+		colorFlag   string
+		showVersion bool
 	)
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
 	fs.StringVar(&colorFlag, "color", "auto", "colorize output (always, never, auto)")
+	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: gh-sync [options]\n")
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		fmt.Fprintf(os.Stderr, "  --verbose\n        verbose output\n")
 		fmt.Fprintf(os.Stderr, "  --color string\n        colorize output (always, never, auto) (default \"auto\")\n")
+		fmt.Fprintf(os.Stderr, "  --version\n        print version and exit\n")
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if showVersion {
+		fmt.Printf("gh-sync version %s\n", version)
+		return nil
 	}
 
 	switch colorFlag {
