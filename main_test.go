@@ -383,7 +383,9 @@ func (f *syncFixture) sync(extraArgs ...string) syncResult {
 		if err != nil {
 			f.t.Fatal(err)
 		}
-		file.Close()
+		if err := file.Close(); err != nil {
+			f.t.Fatal(err)
+		}
 		return string(b)
 	}
 	res := syncResult{stdout: read(outFile), stderr: read(errFile), err: runErr}
