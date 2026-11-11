@@ -54,6 +54,14 @@ The entire application is contained in a single `main.go` file with the followin
 4. **Default Branch Detection**: Checks remote/HEAD first, then tries main, then master, defaulting to main
 5. **Error Handling**: All errors exit with status code 1 and colored error messages to stderr
 
+## CI
+
+GitHub Actions workflow (`.github/workflows/ci.yml`) runs on pushes to `main` and on pull requests:
+- `go test ./...` on ubuntu, macOS and Windows
+- `gofmt -l .` (fails if any file is unformatted), `go vet ./...` and golangci-lint on ubuntu
+
+The Go version comes from `go.mod` (`go-version-file`), so bumping Go only requires updating `go.mod`.
+
 ## Release Process
 
 GitHub Actions workflow (`.github/workflows/release.yml`) builds cross-platform binaries when a version tag is pushed:
