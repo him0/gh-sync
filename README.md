@@ -33,9 +33,9 @@ gh sync [options]
 
 - `--verbose`: Show git commands being executed (similar to hub's HUB_VERBOSE=1)
 - `--color[=WHEN]`: Control color output
-  - `always`: Always colorize output
-  - `never`: Never colorize output  
-  - `auto`: Colorize output only when stdout is a terminal (default)
+  - `always`: Always colorize output (both stdout and stderr, even if `NO_COLOR` is set)
+  - `never`: Never colorize output
+  - `auto`: Colorize each stream only when it is a terminal (default). stdout messages (e.g. `Updated branch ...`) follow stdout, errors and verbose logs follow stderr, so `gh sync | grep Updated` emits no escape sequences. Color is disabled when the `NO_COLOR` environment variable is set (`--color=always` still forces it)
 
 ### Examples
 
