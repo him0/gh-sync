@@ -1,3 +1,20 @@
 [tools]
 go = "1.27.4"
-just = "1.50.0"
+
+[tasks.build]
+description = "Build the gh-sync binary"
+run = "go build -o gh-sync ."
+env = { GOCACHE = "{{config_root}}/.cache/go-build", GOMODCACHE = "{{config_root}}/.cache/go-mod" }
+
+[tasks.test]
+description = "Run tests"
+run = "go test ./..."
+env = { GOCACHE = "{{config_root}}/.cache/go-build", GOMODCACHE = "{{config_root}}/.cache/go-mod" }
+
+[tasks.lint]
+description = "Run go vet and check gofmt"
+run = [
+  "go vet ./...",
+  "files=$(gofmt -l $(git ls-files --cached --others --exclude-standard '*.go')); if [ -n \"$files\" ]; then echo \"$files\"; echo 'gofmt: files above need formatting' >&2; exit 1; fi",
+]
+env = { GOCACHE = "{{config_root}}/.cache/go-build", GOMODCACHE = "{{config_root}}/.cache/go-mod" }
