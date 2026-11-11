@@ -228,8 +228,7 @@ func getRemotes() ([]Remote, error) {
 
 func getDefaultBranch(remote *Remote) (string, error) {
 	// Try to get symbolic ref for remote HEAD first
-	cmd := exec.Command("git", "symbolic-ref", fmt.Sprintf("refs/remotes/%s/HEAD", remote.Name))
-	output, err := cmd.Output()
+	output, err := gitOutput("symbolic-ref", fmt.Sprintf("refs/remotes/%s/HEAD", remote.Name))
 	if err == nil {
 		ref := strings.TrimSpace(string(output))
 		prefix := fmt.Sprintf("refs/remotes/%s/", remote.Name)
@@ -238,15 +237,15 @@ func getDefaultBranch(remote *Remote) (string, error) {
 		}
 	}
 
-	// Check if main branch exists on remote
-	cmd = exec.Command("git", "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/remotes/%s/main", remote.Name))
-	if cmd.Run() == nil {
+	// Check if main branch exists on remote. show-ref --verify --quiet only
+	// signals existence through its exit code, so there is no diagnostic to
+	// capture here.
+	if hasRemoteBranch(fmt.Sprintf("refs/remotes/%s/main", remote.Name)) {
 		return "main", nil
 	}
 
 	// Check if master branch exists on remote
-	cmd = exec.Command("git", "show-ref", "--verify", "--quiet", fmt.Sprintf("refs/remotes/%s/master", remote.Name))
-	if cmd.Run() == nil {
+	if hasRemoteBranch(fmt.Sprintf("refs/remotes/%s/master", remote.Name)) {
 		return "master", nil
 	}
 
@@ -527,6 +526,6 @@ func colorizeOutput(flag string) bool {
 	}
 }
 
-func printError(colors colorConfig, format string, args ...interface{}) {
+func printError(colors colorConfig, format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "%s%s%s\n", colors.lightRed, fmt.Sprintf(format, args...), colors.reset)
 }
