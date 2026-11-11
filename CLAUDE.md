@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-gh-sync is a GitHub CLI extension that synchronizes a forked repository with its upstream parent repository. It's inspired by hub's sync command but implemented as a standalone gh extension.
+gh-sync is a GitHub CLI extension that brings every local branch up to date with its remote (fast-forwarding branches that are behind) and deletes local branches that were merged and deleted on the remote. The remote is usually `origin`; in a fork with an `upstream` remote it is the parent repository. It's inspired by hub's sync command but implemented as a standalone gh extension.
 
 ## Build and Development Commands
 

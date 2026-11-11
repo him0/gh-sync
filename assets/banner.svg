@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400" role="img" aria-label="gh sync: every local branch up to date, in one command">
+  <rect width="1200" height="400" rx="24" fill="#121c14"/>
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-weight="700">
+    <text x="80" y="200" font-size="92" fill="#f1f6ea">gh <tspan dx="-34" fill="#b6f05a">sync</tspan></text>
+  </g>
+  <text x="84" y="252" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" font-size="22" fill="#9aa890">Every local branch up to date, in one command.</text>
+
+  <!-- commit line -->
+  <line x1="690" y1="190" x2="1130" y2="190" stroke="#2a3d27" stroke-width="6" stroke-linecap="round"/>
+  <line x1="800" y1="190" x2="1130" y2="190" stroke="#b6f05a" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="690" cy="190" r="13" fill="#121c14" stroke="#5c6e55" stroke-width="5"/>
+  <circle cx="800" cy="190" r="13" fill="#121c14" stroke="#5c6e55" stroke-width="5"/>
+  <circle cx="910" cy="190" r="13" fill="#b6f05a"/>
+  <circle cx="1020" cy="190" r="13" fill="#b6f05a"/>
+  <circle cx="1130" cy="190" r="17" fill="#b6f05a"/>
+
+  <!-- stems -->
+  <g stroke="#5c6e55" stroke-width="2">
+    <line x1="1130" y1="144" x2="1130" y2="170"/>
+    <line x1="800" y1="206" x2="800" y2="236"/>
+    <line x1="1130" y1="210" x2="1130" y2="236"/>
+  </g>
+
+  <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="17" font-weight="700" text-anchor="middle">
+    <rect x="1034" y="108" width="136" height="36" rx="8" fill="#b6f05a"/>
+    <text x="1102" y="132" fill="#121c14">origin/main</text>
+
+    <rect x="765" y="236" width="70" height="36" rx="8" fill="none" stroke="#5c6e55" stroke-width="2" stroke-dasharray="5 5"/>
+    <text x="800" y="260" fill="#5c6e55">main</text>
+
+    <rect x="1095" y="236" width="70" height="36" rx="8" fill="#f1f6ea"/>
+    <text x="1130" y="260" fill="#121c14">main</text>
+
+    <text x="960" y="304" font-size="15" font-weight="400" fill="#b6f05a">fast-forward</text>
+  </g>
+
+  <!-- move arrow -->
+  <line x1="847" y1="254" x2="1070" y2="254" stroke="#b6f05a" stroke-width="3" stroke-linecap="round" stroke-dasharray="2 10"/>
+  <g fill="#b6f05a">
+    <path d="M940 242l16 12-16 12z"/>
+    <path d="M960 242l16 12-16 12z"/>
+    <path d="M1072 245l13 9-13 9z"/>
+  </g>
+  <rect x="930" y="240" width="52" height="28" fill="#121c14" opacity="0"/>
+</svg>

@@ -1,15 +1,24 @@
+<p align="center"><img src="assets/banner.svg" alt="gh sync: every local branch up to date, in one command" width="100%"></p>
+
 # gh-sync
 
-GitHub CLI Extension to sync your fork with its upstream repository.
+English | [日本語](README.ja.md)
 
-## Features
+[![CI](https://github.com/him0/gh-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/him0/gh-sync/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/him0/gh-sync)](https://github.com/him0/gh-sync/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/him0/gh-sync)](LICENSE)
 
-- Automatically detects the main remote (upstream, github, origin priority)
-- Fetches and syncs local branches with their remote counterparts
-- Fast-forwards branches that are behind their remote tracking branches
-- Deletes local branches that were deleted on the remote (if safely merged)
-- Colored output for better visibility
-- Verbose logging support to see git commands being executed
+A [GitHub CLI](https://cli.github.com/) extension that brings every local branch up to date with its remote in one command, and cleans up the branches that were merged and deleted there.
+
+It is a standalone port of [`hub sync`](https://hub.github.com/hub-sync.1.html) for people who moved from hub to gh.
+
+```console
+$ gh sync
+Updated branch main (was 3f2a1bc).
+Updated branch feature/login (was 9d04e7a).
+Deleted branch fix/typo (was c81b2d5).
+warning: 'wip/experiment' seems to contain unpushed commits
+```
 
 ## Installation
 
@@ -17,83 +26,129 @@ GitHub CLI Extension to sync your fork with its upstream repository.
 gh extension install him0/gh-sync
 ```
 
-### Upgrade
+Precompiled binaries are published for macOS, Linux, Windows and FreeBSD, so Go is not required.
 
 ```bash
-gh extension upgrade gh-sync
+# Upgrade to the latest release
+gh extension upgrade sync
+
+# Install a specific version
+gh extension install him0/gh-sync --pin v0.5.0
 ```
 
 ## Usage
 
-```bash
-gh sync [options]
-```
-
-### Options
-
-- `--verbose`: Show git commands being executed (similar to hub's HUB_VERBOSE=1)
-- `--color[=WHEN]`: Control color output
-  - `always`: Always colorize output (both stdout and stderr, even if `NO_COLOR` is set)
-  - `never`: Never colorize output
-  - `auto`: Colorize each stream only when it is a terminal (default). stdout messages (e.g. `Updated branch ...`) follow stdout, errors and verbose logs follow stderr, so `gh sync | grep Updated` emits no escape sequences. Color is disabled when the `NO_COLOR` environment variable is set (`--color=always` still forces it)
-- `--version`: Print the gh-sync version and exit (include this in bug reports)
-
-### Examples
+Run it anywhere inside a git repository:
 
 ```bash
-# Basic sync
 gh sync
-
-# Sync with verbose output
-gh sync --verbose
-
-# Sync with color control
-gh sync --color=always
-gh sync --color=never
-
-# Combine options
-gh sync --verbose --color=never
-
-# Show the installed version
-gh sync --version
 ```
 
-This will:
-1. Check if the current directory is a git repository
-2. Find the main remote (priority: upstream, github, origin)
-3. Fetch from the main remote with --prune
-4. Process each local branch:
-   - If branch is behind its remote: fast-forward merge
-   - If branch has unpushed commits: show warning
-   - If remote branch was deleted and local branch is merged: delete local branch
+### What it does
 
-### Example Output
+1. **Picks the main remote.** The first one that exists out of `upstream`, `github`, `origin`; otherwise the first remote listed by git. In an ordinary clone that is `origin`. In a fork where you added an `upstream` remote, your branches are synced with the parent repository instead.
+2. **Fetches it** with `git fetch --prune`.
+3. **Walks every local branch** and compares it with its counterpart on the main remote: the configured upstream if the branch tracks that remote, otherwise the branch with the same name.
 
-```bash
+| State of the local branch | Action |
+| --- | --- |
+| Behind the remote branch | Fast-forwarded: `Updated branch <name> (was <sha>).` |
+| Up to date | Nothing |
+| Has commits that are not on the remote branch (ahead or diverged) | Left untouched: `warning: '<name>' seems to contain unpushed commits` |
+| Upstream branch was deleted, and every commit is in the remote default branch | Deleted: `Deleted branch <name> (was <sha>).` |
+| Upstream branch was deleted, but some commits are not in the remote default branch | Left untouched: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
+| No counterpart on the main remote | Nothing |
+
+### Safety
+
+gh-sync only ever moves branches forward or removes ones that are fully merged:
+
+- It never merges, rebases, force-updates or pushes. A branch with local-only commits is always left as is.
+- A branch is deleted only when it tracked a branch on the main remote, that branch is gone, and the local branch has no commits missing from the remote default branch. Branches that never had an upstream are never deleted.
+- If the branch being deleted is checked out, gh-sync switches to the default branch first.
+- A branch checked out in another worktree is not moved.
+
+Two things worth knowing:
+
+- Pull requests merged with **squash** or **rebase** leave commits that are not in the default branch, so those local branches are reported as "appears not merged" and kept. Delete them yourself with `git branch -D`.
+- gh-sync updates your **local** branches only. When you sync a fork against `upstream`, push afterwards to update the fork on GitHub as well (e.g. `git push origin main`).
+
+## Options
+
+| Option | Description |
+| --- | --- |
+| `--verbose` | Print each git command that changes something, as `$ git ...`, to stderr (like hub's `HUB_VERBOSE=1`) |
+| `--color=WHEN` | Colorize output: `auto` (default), `always` or `never` |
+| `--version` | Print the gh-sync version and exit |
+| `--help` | Print usage |
+
+### Color
+
+With `--color=auto`, stdout and stderr are decided independently: each stream is colorized only when it is a terminal. `gh sync | grep Updated` therefore emits no escape sequences even though warnings on the terminal stay colored.
+
+Setting the [`NO_COLOR`](https://no-color.org) environment variable disables color in `auto` mode. `--color=always` overrides it.
+
+### Output and exit status
+
+- `Updated branch ...` and `Deleted branch ...` go to **stdout**.
+- Warnings, errors and `--verbose` logs go to **stderr**.
+- The exit status is `0` on success, including when branches were skipped with a warning, and `1` when gh-sync could not run (not a git repository, no remote, fetch failed) or an update or deletion failed.
+
+```console
 $ gh sync --verbose
 $ git fetch --prune --quiet --progress origin
-Updated branch feature-branch (was abc1234).
-Deleted branch old-feature (was def5678).
-warning: 'work-in-progress' seems to contain unpushed commits
+$ git merge --ff-only --quiet refs/remotes/origin/main
+Updated branch main (was 3f2a1bc).
 ```
+
+## Troubleshooting
+
+**`could not determine default branch`**
+The remote has no `HEAD` reference and neither `main` nor `master`. Set it with:
+
+```bash
+git remote set-head <remote> --auto
+```
+
+**`warning: couldn't fast-forward '<name>'`**
+The branch is checked out and local changes would be overwritten, or it is checked out in another worktree. Commit or stash the changes and run `gh sync` again.
+
+**`warning: '<name>' upstream config is broken; skipping`**
+`branch.<name>.merge` is missing or invalid. Repair it with:
+
+```bash
+git branch --set-upstream-to=<remote>/<branch> <name>
+```
+
+**The wrong remote is used**
+The priority is fixed: `upstream`, `github`, `origin`. Rename your remotes accordingly (`git remote rename <old> upstream`).
+
+When reporting a bug, please include the output of `gh sync --version` and `gh sync --verbose`.
 
 ## Requirements
 
-- [GitHub CLI](https://cli.github.com/) (gh) must be installed and authenticated
-- Git must be installed
-- The current directory must be a git repository with configured remotes
+- [GitHub CLI](https://cli.github.com/) 2.0 or later
+- Git
 
-## Notes
+## Development
 
-- The extension processes all local branches and their remote tracking branches
-- Branches with unpushed commits are left untouched (with a warning)
-- Local branches are only deleted if they appear to be safely merged into the default branch
-- The extension uses the default branch of the main remote (main or master)
+Tool versions and tasks are managed with [mise](https://mise.jdx.dev/).
+
+```bash
+mise run build   # build ./gh-sync
+mise run test    # go test ./...
+mise run lint    # go vet + gofmt check
+
+./gh-sync --verbose        # run the local build directly
+gh extension install .     # or install the checkout as `gh sync`
+```
+
+Pushing a `v*` tag builds the binaries for all platforms and publishes a release. See [CLAUDE.md](CLAUDE.md) for the architecture, CI and release details.
 
 ## Acknowledgments
 
-This project is inspired by [hub](https://github.com/mislav/hub)'s `sync` command. While hub provides a comprehensive set of GitHub CLI features, gh-sync focuses solely on the fork synchronization functionality as a standalone GitHub CLI extension.
+Inspired by the `sync` command of [hub](https://github.com/mislav/hub), which this extension reimplements on its own for the GitHub CLI.
 
 ## License
 
-MIT
+[MIT](LICENSE)
