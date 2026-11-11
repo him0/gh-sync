@@ -36,6 +36,7 @@ gh sync [options]
   - `always`: Always colorize output (both stdout and stderr, even if `NO_COLOR` is set)
   - `never`: Never colorize output
   - `auto`: Colorize each stream only when it is a terminal (default). stdout messages (e.g. `Updated branch ...`) follow stdout, errors and verbose logs follow stderr, so `gh sync | grep Updated` emits no escape sequences. Color is disabled when the `NO_COLOR` environment variable is set (`--color=always` still forces it)
+- `--version`: Print the gh-sync version and exit (include this in bug reports)
 
 ### Examples
 
@@ -52,6 +53,9 @@ gh sync --color=never
 
 # Combine options
 gh sync --verbose --color=never
+
+# Show the installed version
+gh sync --version
 ```
 
 This will:

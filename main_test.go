@@ -451,6 +451,30 @@ func assertNotContains(t *testing.T, label, got, unwanted string) {
 	}
 }
 
+// TestRunVersion checks that --version prints the embedded version and exits
+// successfully without touching git (the fixture has pending upstream commits
+// that a real sync would fast-forward).
+func TestRunVersion(t *testing.T) {
+	f := newSyncFixture(t)
+	before := f.sha(f.local, "main")
+	f.advanceUpstream("main", "upstream-1")
+
+	origVersion := version
+	version = "v1.2.3"
+	t.Cleanup(func() { version = origVersion })
+
+	res := f.sync("--version")
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	if got, want := res.stdout, "gh-sync version v1.2.3\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	if got := f.sha(f.local, "main"); got != before {
+		t.Errorf("local main moved to %s, want it left at %s", got, before)
+	}
+}
+
 func TestRunFastForwardsCurrentBranch(t *testing.T) {
 	f := newSyncFixture(t)
 	before := f.sha(f.local, "main")
