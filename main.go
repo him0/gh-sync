@@ -60,10 +60,14 @@ func newColorConfig(enabled bool) colorConfig {
 // messages written to stdout (e.g. "Updated branch ...") and stderrColors for
 // messages written to stderr (errors, verbose logs). This keeps ANSI escapes
 // out of a stream that is piped even when the other one is a terminal.
+//
+// dryRun reports the updates and deletions processBranch would make without
+// making them. fetch still runs so the report reflects the remote's state.
 type runConfig struct {
 	stdoutColors colorConfig
 	stderrColors colorConfig
 	verbose      bool
+	dryRun       bool
 }
 
 func main() {
@@ -83,16 +87,19 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("gh-sync", flag.ContinueOnError)
 	var (
 		verbose     bool
+		dryRun      bool
 		colorFlag   string
 		showVersion bool
 	)
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
+	fs.BoolVar(&dryRun, "dry-run", false, "show what would be updated or deleted without changing branches")
 	fs.StringVar(&colorFlag, "color", "auto", "colorize output (always, never, auto)")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: gh-sync [options]\n")
 		fmt.Fprintf(os.Stderr, "\nOptions:\n")
 		fmt.Fprintf(os.Stderr, "  --verbose\n        verbose output\n")
+		fmt.Fprintf(os.Stderr, "  --dry-run\n        show what would be updated or deleted without changing branches\n")
 		fmt.Fprintf(os.Stderr, "  --color string\n        colorize output (always, never, auto) (default \"auto\")\n")
 		fmt.Fprintf(os.Stderr, "  --version\n        print version and exit\n")
 	}
@@ -117,6 +124,7 @@ func run(args []string) error {
 		stdoutColors: newColorConfig(colorizeOutput(colorFlag, isatty.IsTerminal(os.Stdout.Fd()), noColor)),
 		stderrColors: newColorConfig(colorizeOutput(colorFlag, isatty.IsTerminal(os.Stderr.Fd()), noColor)),
 		verbose:      verbose,
+		dryRun:       dryRun,
 	}
 
 	if err := checkGitRepo(); err != nil {
@@ -392,6 +400,10 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 			return nil
 		case ahead == 0 && behind > 0:
 			oldCommit := getCommitSHA(fullBranch)
+			if cfg.dryRun {
+				fmt.Printf("%sWould update branch %s%s%s (was %s).\n", cfg.stdoutColors.green, cfg.stdoutColors.lightGreen, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
+				return nil
+			}
 			var updateErr error
 			if branch == *currentBranch {
 				updateErr = runGitSilent(cfg, "merge", "--ff-only", "--quiet", remoteBranch)
@@ -429,6 +441,10 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 	// ahead == 0: every commit on this branch is already in the default
 	// branch, so it's safe to delete.
 	oldCommit := getCommitSHA(fullBranch)
+	if cfg.dryRun {
+		fmt.Printf("%sWould delete branch %s%s%s (was %s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
+		return nil
+	}
 	if branch == *currentBranch {
 		if err := runGitSilent(cfg, "checkout", "--quiet", defaultBranch); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: couldn't checkout '%s': %s\n", defaultBranch, err.Error())

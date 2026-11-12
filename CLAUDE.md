@@ -38,6 +38,7 @@ go mod tidy
 ## Command Line Options
 
 - `--verbose`: Show git commands being executed (similar to hub's HUB_VERBOSE=1)
+- `--dry-run`: Report `Would update branch ...` / `Would delete branch ...` instead of fast-forwarding, checking out or deleting branches (fetch still runs)
 - `--color[=WHEN]`: Control color output
   - `always`: Always colorize output (both stdout and stderr, even if `NO_COLOR` is set)
   - `never`: Never colorize output
@@ -57,7 +58,7 @@ The entire application is contained in a single `main.go` file with the followin
 
 ## Key Implementation Details
 
-1. **Command Line Parsing**: Uses Go's `flag` package for --verbose and --color options
+1. **Command Line Parsing**: Uses Go's `flag` package for --verbose, --dry-run and --color options
 2. **Verbose Logging**: Shows git commands in `$ git command args` format with magenta color
 3. **Color Output**: Uses ANSI escape codes with per-stream isatty detection (`runConfig` holds separate `stdoutColors` / `stderrColors`)
 4. **Default Branch Detection**: Checks remote/HEAD first, then tries main, then master, defaulting to main
