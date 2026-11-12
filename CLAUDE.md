@@ -38,7 +38,7 @@ go mod tidy
 ## Command Line Options
 
 - `--verbose`: Show git commands being executed (similar to hub's HUB_VERBOSE=1)
-- `--dry-run`: Report `Would update branch ...` / `Would delete branch ...` instead of fast-forwarding, checking out or deleting branches (fetch still runs)
+- `--dry-run`: Report `Would update branch ...` / `Would delete branch ...` (preceded by `Would switch to branch ...` when the checked-out branch would be deleted) instead of fast-forwarding, checking out or deleting branches (fetch still runs)
 - `--color[=WHEN]`: Control color output
   - `always`: Always colorize output (both stdout and stderr, even if `NO_COLOR` is set)
   - `never`: Never colorize output

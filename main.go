@@ -441,16 +441,20 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 	// ahead == 0: every commit on this branch is already in the default
 	// branch, so it's safe to delete.
 	oldCommit := getCommitSHA(fullBranch)
-	if cfg.dryRun {
-		fmt.Printf("%sWould delete branch %s%s%s (was %s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
-		return nil
-	}
 	if branch == *currentBranch {
-		if err := runGitSilent(cfg, "checkout", "--quiet", defaultBranch); err != nil {
+		if cfg.dryRun {
+			fmt.Printf("Would switch to branch %s.\n", defaultBranch)
+		} else if err := runGitSilent(cfg, "checkout", "--quiet", defaultBranch); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: couldn't checkout '%s': %s\n", defaultBranch, err.Error())
 			return err
 		}
+		// In dry-run mode only the in-memory value changes, so later branches
+		// are evaluated as they would be in a real run; HEAD is not touched.
 		*currentBranch = defaultBranch
+	}
+	if cfg.dryRun {
+		fmt.Printf("%sWould delete branch %s%s%s (was %s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
+		return nil
 	}
 	if err := runGitSilent(cfg, "branch", "-D", branch); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: couldn't delete '%s': %s\n", branch, err.Error())

@@ -78,7 +78,7 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 | オプション | 説明 |
 | --- | --- |
 | `--verbose` | 変更を伴う git コマンドを `$ git ...` の形式で stderr に表示する(hub の `HUB_VERBOSE=1` 相当) |
-| `--dry-run` | 更新・削除されるブランチを表示する(`Would update branch ...`、`Would delete branch ...`)だけで、ローカルブランチは変更しない。fetch は実行する |
+| `--dry-run` | 更新・削除されるブランチを表示する(`Would update branch ...`、`Would delete branch ...`。チェックアウト中のブランチが削除される場合は、その前に `Would switch to branch ...`)だけで、ローカルブランチは変更しない。fetch は実行する |
 | `--color=WHEN` | 出力に色を付ける: `auto`(デフォルト)、`always`、`never` |
 | `--version` | gh-sync のバージョンを表示して終了する |
 | `--help` | 使い方を表示する |
@@ -91,7 +91,7 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 
 ### 出力と終了ステータス
 
-- `Updated branch ...` と `Deleted branch ...`(`--dry-run` では `Would update branch ...` と `Would delete branch ...`)は **stdout** に出力されます。
+- `Updated branch ...` と `Deleted branch ...`(`--dry-run` では `Would update branch ...`、`Would switch to branch ...`、`Would delete branch ...`)は **stdout** に出力されます。
 - 警告、エラー、`--verbose` のログは **stderr** に出力されます。
 - 終了ステータスは、成功時(警告を出してブランチをスキップした場合を含む)が `0`、実行できなかったとき(git リポジトリではない、remote が無い、fetch に失敗した)や更新・削除に失敗したときが `1` です。
 

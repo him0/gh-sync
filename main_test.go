@@ -598,7 +598,9 @@ func TestRunDryRun(t *testing.T) {
 	}
 	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Would update branch main (was %s).", mainBefore[:7]))
 	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Would update branch feature (was %s).", featureBefore[:7]))
-	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Would delete branch merged (was %s).", mergedBefore[:7]))
+	// merged is checked out, so the preview must announce the checkout of the
+	// default branch immediately before the deletion.
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Would switch to branch main.\nWould delete branch merged (was %s).", mergedBefore[:7]))
 	assertNotContains(t, "stdout", res.stdout, "Updated branch")
 	assertNotContains(t, "stdout", res.stdout, "Deleted branch")
 

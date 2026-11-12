@@ -78,7 +78,7 @@ Two things worth knowing:
 | Option | Description |
 | --- | --- |
 | `--verbose` | Print each git command that changes something, as `$ git ...`, to stderr (like hub's `HUB_VERBOSE=1`) |
-| `--dry-run` | Show what would be updated or deleted (`Would update branch ...`, `Would delete branch ...`) without changing any local branch. The fetch still runs |
+| `--dry-run` | Show what would be updated or deleted (`Would update branch ...`, `Would delete branch ...`, preceded by `Would switch to branch ...` when the checked-out branch would be deleted) without changing any local branch. The fetch still runs |
 | `--color=WHEN` | Colorize output: `auto` (default), `always` or `never` |
 | `--version` | Print the gh-sync version and exit |
 | `--help` | Print usage |
@@ -91,7 +91,7 @@ Setting the [`NO_COLOR`](https://no-color.org) environment variable disables col
 
 ### Output and exit status
 
-- `Updated branch ...` and `Deleted branch ...` (`Would update branch ...` and `Would delete branch ...` with `--dry-run`) go to **stdout**.
+- `Updated branch ...` and `Deleted branch ...` (`Would update branch ...`, `Would switch to branch ...` and `Would delete branch ...` with `--dry-run`) go to **stdout**.
 - Warnings, errors and `--verbose` logs go to **stderr**.
 - The exit status is `0` on success, including when branches were skipped with a warning, and `1` when gh-sync could not run (not a git repository, no remote, fetch failed) or an update or deletion failed.
 
