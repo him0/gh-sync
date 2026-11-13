@@ -571,6 +571,53 @@ func TestRunKeepsUnmergedGoneBranch(t *testing.T) {
 	}
 }
 
+// TestRunDryRun checks that --dry-run reports every update and deletion a real
+// sync would make (fast-forwarding non-current branches, deleting the
+// checked-out merged branch) while leaving all branches and HEAD untouched.
+func TestRunDryRun(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushUpstreamBranch("feature", "feature-1")
+	f.trackRemoteBranch("feature")
+	f.pushUpstreamBranch("merged", "merged-1")
+	f.trackRemoteBranch("merged")
+	f.localGit("checkout", "--quiet", "merged")
+
+	mainBefore := f.sha(f.local, "main")
+	featureBefore := f.sha(f.local, "feature")
+	mergedBefore := f.sha(f.local, "merged")
+
+	f.advanceUpstream("feature", "feature-2")
+	f.upstreamGit("checkout", "--quiet", "main")
+	f.upstreamGit("merge", "--quiet", "--ff-only", "merged")
+	f.upstreamGit("push", "--quiet", "origin", "main")
+	f.deleteRemoteBranch("merged")
+
+	res := f.sync("--dry-run")
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Would update branch main (was %s).", mainBefore[:7]))
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Would update branch feature (was %s).", featureBefore[:7]))
+	// merged is checked out, so the preview must announce the checkout of the
+	// default branch immediately before the deletion.
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Would switch to branch main.\nWould delete branch merged (was %s).", mergedBefore[:7]))
+	assertNotContains(t, "stdout", res.stdout, "Updated branch")
+	assertNotContains(t, "stdout", res.stdout, "Deleted branch")
+
+	for branch, want := range map[string]string{"main": mainBefore, "feature": featureBefore, "merged": mergedBefore} {
+		if !f.localBranchExists(branch) {
+			t.Errorf("local branch %s was deleted", branch)
+			continue
+		}
+		if got := f.sha(f.local, branch); got != want {
+			t.Errorf("local %s = %s, want unchanged %s", branch, got, want)
+		}
+	}
+	if f.currentBranch() != "merged" {
+		t.Errorf("current branch = %q, want merged", f.currentBranch())
+	}
+}
+
 func TestRunWarnsOnUnpushedCommits(t *testing.T) {
 	tests := []struct {
 		name            string
