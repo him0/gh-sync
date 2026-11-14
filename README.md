@@ -48,7 +48,7 @@ gh sync
 
 1. **Picks the main remote.** The one given with `--remote`; otherwise the first one that exists out of `upstream`, `github`, `origin`; otherwise the first remote listed by git. In an ordinary clone that is `origin`. In a fork where you added an `upstream` remote, your branches are synced with the parent repository instead.
 2. **Fetches it** with `git fetch --prune`. When stderr is a terminal, git's fetch progress is shown there.
-3. **Walks every local branch** and compares it with its counterpart on the main remote: the configured upstream if the branch tracks that remote, otherwise the branch with the same name.
+3. **Walks every local branch**, except those matching an [exclude pattern](#excluding-branches), and compares it with its counterpart on the main remote: the configured upstream if the branch tracks that remote, otherwise the branch with the same name.
 
 | State of the local branch | Action |
 | --- | --- |
@@ -82,10 +82,25 @@ Worth knowing:
 | `--dry-run` | Show what would be updated or deleted (`Would update branch ...`, `Would delete branch ...`, preceded by `Would switch to branch ...` when the checked-out branch would be deleted) without changing any local branch. The fetch still runs |
 | `--color=WHEN` | Colorize output: `auto` (default), `always` or `never` |
 | `--remote=NAME` | Use `NAME` as the main remote instead of choosing one automatically. gh-sync fails if no remote has that name |
+| `--exclude=GLOB` | Leave local branches matching `GLOB` alone (neither updated nor deleted). Can be given more than once. See [Excluding branches](#excluding-branches) |
 | `--version` | Print the gh-sync version and exit |
 | `--help` | Print usage to stdout |
 
 gh-sync takes no positional arguments. Anything that is not an option, such as `gh sync dry-run` (missing `--`) or `gh sync foo --dry-run`, is rejected with `fatal: unexpected argument: ...` and the usage, and nothing is synced.
+
+### Excluding branches
+
+Branches that match an exclude pattern are skipped entirely: they are never fast-forwarded or deleted. Patterns come from two places, and all of them apply:
+
+- the `gh-sync.exclude` git config key, which can hold several values:
+  ```sh
+  git config --add gh-sync.exclude 'wip/*'
+  git config --add gh-sync.exclude 'experiment'
+  ```
+  Use `--global` to apply them to every repository.
+- `--exclude=GLOB` on the command line, repeatable (`gh sync --exclude='wip/*' --exclude=tmp`).
+
+Patterns are matched against the whole local branch name with Go's [`path.Match`](https://pkg.go.dev/path#Match): `*` and `?` do not match `/`, so `wip/*` matches `wip/foo` but not `wip/foo/bar` (add `wip/*/*` for that). An invalid pattern such as `[` stops gh-sync with `fatal: invalid exclude pattern ...` before anything is fetched. `--verbose` prints `note: skipping '<name>' (excluded by '<pattern>')` for each skipped branch.
 
 ### Color
 
