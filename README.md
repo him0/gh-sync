@@ -46,7 +46,7 @@ gh sync
 
 ### What it does
 
-1. **Picks the main remote.** The first one that exists out of `upstream`, `github`, `origin`; otherwise the first remote listed by git. In an ordinary clone that is `origin`. In a fork where you added an `upstream` remote, your branches are synced with the parent repository instead.
+1. **Picks the main remote.** The one given with `--remote`; otherwise the first one that exists out of `upstream`, `github`, `origin`; otherwise the first remote listed by git. In an ordinary clone that is `origin`. In a fork where you added an `upstream` remote, your branches are synced with the parent repository instead.
 2. **Fetches it** with `git fetch --prune`. When stderr is a terminal, git's fetch progress is shown there.
 3. **Walks every local branch** and compares it with its counterpart on the main remote: the configured upstream if the branch tracks that remote, otherwise the branch with the same name.
 
@@ -81,6 +81,7 @@ Worth knowing:
 | `--verbose` | Print each git command that changes something, and the `gh` command that looks up merged pull requests, as `$ git ...` / `$ gh ...`, to stderr (like hub's `HUB_VERBOSE=1`) |
 | `--dry-run` | Show what would be updated or deleted (`Would update branch ...`, `Would delete branch ...`, preceded by `Would switch to branch ...` when the checked-out branch would be deleted) without changing any local branch. The fetch still runs |
 | `--color=WHEN` | Colorize output: `auto` (default), `always` or `never` |
+| `--remote=NAME` | Use `NAME` as the main remote instead of choosing one automatically. gh-sync fails if no remote has that name |
 | `--version` | Print the gh-sync version and exit |
 | `--help` | Print usage to stdout |
 
@@ -127,7 +128,7 @@ git branch --set-upstream-to=<remote>/<branch> <name>
 ```
 
 **The wrong remote is used**
-The priority is fixed: `upstream`, `github`, `origin`. Rename your remotes accordingly (`git remote rename <old> upstream`).
+Without `--remote`, the priority is `upstream`, `github`, `origin`. Name the remote to use with `--remote` (`gh sync --remote=fork`), or rename your remotes accordingly (`git remote rename <old> upstream`).
 
 When reporting a bug, please include the output of `gh sync --version` and `gh sync --verbose`.
 

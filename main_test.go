@@ -954,6 +954,51 @@ func TestRunRejectsPositionalArguments(t *testing.T) {
 
 // TestRunHelp checks that --help prints the usage to stdout, so
 // `gh sync --help | less` works, and does not sync (issue #63).
+func TestRunRemoteFlag(t *testing.T) {
+	f := newSyncFixture(t)
+	// A second remote "fork" (a copy of remote.git) where feature moves on.
+	// It ranks below origin, so only --remote=fork selects it.
+	fork := filepath.Join(t.TempDir(), "fork.git")
+	f.gitIn(f.upstream, "clone", "--quiet", "--bare", f.remote, fork)
+	f.upstreamGit("remote", "add", "fork", fork)
+	f.pushUpstreamBranch("feature", "feature-1")
+	f.upstreamGit("push", "--quiet", "fork", "main", "feature")
+	f.localGit("remote", "add", "fork", fork)
+	f.localGit("fetch", "--quiet", "fork")
+	f.localGit("branch", "--quiet", "--track", "feature", "fork/feature")
+	before := f.sha(f.local, "feature")
+	f.upstreamGit("checkout", "--quiet", "feature")
+	f.commit(f.upstream, "feature-2")
+	f.upstreamGit("push", "--quiet", "fork", "feature")
+	f.upstreamGit("checkout", "--quiet", "main")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	f.assertBranchAt("feature", before)
+
+	res = f.sync("--remote=fork")
+	if res.err != nil {
+		t.Fatalf("run(--remote=fork) error: %v", res.err)
+	}
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch feature (was %s).", before[:7]))
+	f.assertBranchAt("feature", f.sha(f.upstream, "feature"))
+}
+
+func TestRunRemoteFlagUnknownRemote(t *testing.T) {
+	f := newSyncFixture(t)
+	before := f.sha(f.local, "main")
+	f.advanceUpstream("main", "upstream-1")
+
+	res := f.sync("--remote=nope")
+	if res.err == nil {
+		t.Fatal("run() succeeded, want an error for an unknown remote")
+	}
+	assertContains(t, "stderr", res.stderr, "fatal: no such remote 'nope'")
+	f.assertBranchAt("main", before)
+}
+
 func TestRunHelp(t *testing.T) {
 	f := newSyncFixture(t)
 	before := f.sha(f.local, "main")
