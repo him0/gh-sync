@@ -691,16 +691,26 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 			remoteBranch = b.upstream
 			ahead, behind, counted = b.ahead, b.behind, true
 		} else {
-			// The upstream can't be resolved for two distinct reasons:
-			//   (a) the remote tracking ref was pruned (truly gone), or
-			//   (b) branch.<name>.merge is missing/malformed (misconfig).
-			// Treat the branch as gone only when (a) is the case — otherwise
-			// the deletion path below would force-delete a branch over a
-			// config typo.
+			// While a same-named remote branch still exists, a missing
+			// upstream points at broken config rather than a deleted branch:
+			// skip it, so a config typo can't lead to deleting it below.
 			if remoteRefs[sameName] {
 				printWarning(cfg.stderrColors, "'%s' upstream config is broken; skipping", branch)
 				return nil
 			}
+			if b.upstream == "" {
+				// git resolves no remote-tracking ref for the upstream:
+				// branch.<name>.merge is missing or invalid, or the upstream
+				// is outside remote.<name>.fetch (a single-branch or shallow
+				// clone, or refs/pull/<N>/head from `gh pr checkout`). The
+				// remote branch may well exist, so this is not "gone".
+				if cfg.verbose {
+					fmt.Fprintf(os.Stderr, "note: '%s' has no remote-tracking ref for its upstream; skipping\n", branch)
+				}
+				return nil
+			}
+			// %(upstream:track) is "[gone]": the remote-tracking ref existed
+			// and was pruned, so the branch was deleted on the remote.
 			gone = true
 		}
 	} else if remoteRefs[sameName] {

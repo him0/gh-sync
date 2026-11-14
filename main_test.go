@@ -1560,3 +1560,56 @@ func TestRunDeleteFailures(t *testing.T) {
 		f.assertBranchAt("feature", before)
 	})
 }
+
+// TestRunSkipsUpstreamOutsideFetchRefspec checks that a branch whose upstream
+// git has no remote-tracking ref for, because the upstream is not covered by
+// remote.origin.fetch, is not treated as deleted on the remote: it is neither
+// deleted nor warned about, with or without commits missing from the default
+// branch.
+func TestRunSkipsUpstreamOutsideFetchRefspec(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(f *syncFixture, branch string)
+	}{
+		// A single-branch (or shallow) clone fetches only main, so pushing
+		// with -u sets branch.<name>.merge without creating
+		// refs/remotes/origin/<name>.
+		{"single-branch refspec", func(f *syncFixture, branch string) {
+			f.localGit("config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+			f.localGit("push", "--quiet", "-u", "origin", branch)
+			f.localGit("update-ref", "-d", "refs/remotes/origin/"+branch)
+		}},
+		// `gh pr checkout` of a pull request from a fork can track
+		// refs/pull/<N>/head, which the default refspec doesn't fetch.
+		{"pull request ref", func(f *syncFixture, branch string) {
+			f.localGit("config", "branch."+branch+".remote", "origin")
+			f.localGit("config", "branch."+branch+".merge", "refs/pull/1/head")
+		}},
+	}
+	for _, tt := range tests {
+		for _, withCommit := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/withCommit=%v", tt.name, withCommit), func(t *testing.T) {
+				f := newSyncFixture(t)
+				f.localGit("checkout", "--quiet", "-b", "topic")
+				if withCommit {
+					f.commit(f.local, "wip")
+				}
+				before := f.sha(f.local, "topic")
+				tt.setup(f, "topic")
+
+				res := f.sync("--verbose")
+				if res.err != nil {
+					t.Fatalf("run() error: %v", res.err)
+				}
+				assertNotContains(t, "stderr", res.stderr, "warning:")
+				assertContains(t, "stderr", res.stderr, "note: 'topic' has no remote-tracking ref for its upstream; skipping")
+				assertNotContains(t, "stdout", res.stdout, "topic")
+				assertNotContains(t, "stdout", res.stdout, "Switched to branch")
+				f.assertBranchAt("topic", before)
+				if f.currentBranch() != "topic" {
+					t.Errorf("current branch = %q, want topic", f.currentBranch())
+				}
+			})
+		}
+	}
+}
