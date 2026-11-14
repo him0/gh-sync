@@ -68,6 +68,7 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 - merge、rebase、強制更新、push は一切しません。ローカルにしか無いコミットを持つブランチは必ずそのまま残ります。
 - ブランチを削除するのは、main remote 上のブランチを追跡していて、git がそのブランチの remote-tracking ref を prune しており(`%(upstream:track)` が `[gone]`)、かつリモートのデフォルトブランチに無いコミットを持たないか、デフォルトブランチにマージ済みの pull request の head コミットがローカルブランチの先頭と完全に一致する場合だけです。upstream を一度も設定していないブランチは削除しません。
 - こうしたブランチは、ほかのブランチの処理が終わったあとに、main remote のリポジトリに対する `gh api graphql` のリクエスト(50 本ごとに 1 回)でまとめて確認します。そのため、これらのメッセージは最後に出力されます。確認できない場合(`gh` が未認証、GitHub 以外の remote、API エラー、30 秒以内に応答が無い)は「appears not merged」の警告を出してブランチを残します。理由は `--verbose` で表示されます。pull request のマージ後にコミットを追加したブランチも残します。
+- main remote が SSH の場合、GitHub のホスト名は `ssh -G <host>` から読みます。そのため `~/.ssh/config` のホストエイリアス(`Host github-work` / `HostName github.com`)も使え、`ssh.github.com`(443 番ポート経由の SSH)は `github.com` として扱います。`ssh` でホスト名を引けない場合は URL のホスト名を使います。
 - 削除対象のブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替え、`Switched to branch ...` と表示します。ローカルにデフォルトブランチが無い場合は、main remote のデフォルトブランチを追跡するブランチとして作成します。
 - 別の worktree でチェックアウトされているブランチは動かしません。
 
