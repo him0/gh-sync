@@ -418,7 +418,7 @@ func TestReadRefs(t *testing.T) {
 		got[b.name] = b
 	}
 	want := map[string]localBranch{
-		"main":      {name: "main", upstream: "refs/remotes/origin/main"},
+		"main":      {name: "main", upstream: "refs/remotes/origin/main", worktreePath: f.localGit("rev-parse", "--show-toplevel")},
 		"same":      {name: "same", upstream: "refs/remotes/origin/same"},
 		"ahead":     {name: "ahead", upstream: "refs/remotes/origin/ahead", ahead: 1},
 		"behind":    {name: "behind", upstream: "refs/remotes/origin/behind", behind: 2},
@@ -1655,19 +1655,63 @@ func TestRunDeleteFailures(t *testing.T) {
 		}
 	})
 
-	// git refuses to delete a branch checked out in another worktree.
-	t.Run("branch -D fails", func(t *testing.T) {
-		f, before := setup(t)
-		f.localGit("worktree", "add", "--quiet", filepath.Join(t.TempDir(), "wt"), "feature")
+}
 
-		res := f.sync()
-		if res.err == nil {
-			t.Fatal("run() error = nil, want an error")
-		}
-		assertContains(t, "stderr", res.stderr, "warning: couldn't delete 'feature':")
-		assertNotContains(t, "stdout", res.stdout, "Deleted branch feature")
-		f.assertBranchAt("feature", before)
-	})
+// TestRunSkipsBranchesInOtherWorktree checks that a behind branch, a merged
+// gone branch and a squash-merged gone branch, each checked out in another
+// worktree, are kept with a warning naming the worktree, are not counted as
+// failures, and get the same warnings with --dry-run.
+func TestRunSkipsBranchesInOtherWorktree(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dryRun=%v", dryRun), func(t *testing.T) {
+			f := newSyncFixture(t)
+			// behind: the remote branch moves on.
+			f.pushUpstreamBranch("behind", "behind-1")
+			f.trackRemoteBranch("behind")
+			f.advanceUpstream("behind", "behind-2")
+			// merged: fast-forward merged into main, then deleted.
+			f.pushUpstreamBranch("merged", "merged-1")
+			f.trackRemoteBranch("merged")
+			f.mergeIntoUpstreamMain("merged")
+			f.deleteRemoteBranch("merged")
+			// squashed: squash-merged via pull request #7, then deleted.
+			f.pushUpstreamBranch("squashed", "squashed-1")
+			f.trackRemoteBranch("squashed")
+			squashedSHA := f.sha(f.local, "squashed")
+			f.squashMergeAndDelete("squashed")
+			var calls []prLookup
+			f.findMergedPRs = stubMergedPRs(map[string][]mergedPR{
+				"squashed": {{Number: 7, HeadRefOid: squashedSHA}},
+			}, &calls)
+
+			before := make(map[string]string)
+			paths := make(map[string]string)
+			for _, branch := range []string{"behind", "merged", "squashed"} {
+				before[branch] = f.sha(f.local, branch)
+				paths[branch] = filepath.Join(t.TempDir(), branch)
+				f.localGit("worktree", "add", "--quiet", paths[branch], branch)
+				// git reports the resolved path (e.g. /private/var on macOS).
+				paths[branch] = f.gitIn(paths[branch], "rev-parse", "--show-toplevel")
+			}
+
+			var args []string
+			if dryRun {
+				args = append(args, "--dry-run")
+			}
+			res := f.sync(args...)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			assertContains(t, "stderr", res.stderr, fmt.Sprintf("warning: 'behind' is checked out in another worktree (%s); not updated", paths["behind"]))
+			assertContains(t, "stderr", res.stderr, fmt.Sprintf("warning: 'merged' is checked out in another worktree (%s); not deleted", paths["merged"]))
+			assertContains(t, "stderr", res.stderr, fmt.Sprintf("warning: 'squashed' is checked out in another worktree (%s); not deleted", paths["squashed"]))
+			assertNotContains(t, "stderr", res.stderr, "couldn't")
+			for branch, sha := range before {
+				assertNotContains(t, "stdout", res.stdout, "branch "+branch)
+				f.assertBranchAt(branch, sha)
+			}
+		})
+	}
 }
 
 // TestRunSkipsUpstreamOutsideFetchRefspec checks that a branch whose upstream

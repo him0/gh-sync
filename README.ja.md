@@ -70,7 +70,7 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 - こうしたブランチは、ほかのブランチの処理が終わったあとに、main remote のリポジトリに対する `gh api graphql` のリクエスト(50 本ごとに 1 回)でまとめて確認します。そのため、これらのメッセージは最後に出力されます。確認できない場合(`gh` が未認証、GitHub 以外の remote、API エラー、30 秒以内に応答が無い)は「appears not merged」の警告を出してブランチを残します。理由は `--verbose` で表示されます。pull request のマージ後にコミットを追加したブランチも残します。
 - main remote が SSH の場合、GitHub のホスト名は `ssh -G <host>` から読みます。そのため `~/.ssh/config` のホストエイリアス(`Host github-work` / `HostName github.com`)も使え、`ssh.github.com`(443 番ポート経由の SSH)は `github.com` として扱います。`ssh` でホスト名を引けない場合は URL のホスト名を使います。
 - 削除対象のブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替え、`Switched to branch ...` と表示します。ローカルにデフォルトブランチが無い場合は、main remote のデフォルトブランチを追跡するブランチとして作成します。
-- 別の worktree でチェックアウトされているブランチは動かしません。
+- 別の worktree でチェックアウトされているブランチは、更新も削除もしません。`warning: '<name>' is checked out in another worktree (<path>); not updated`(または `not deleted`)と表示してスキップし(`--dry-run` でも同じ)、終了ステータスは 1 になりません。
 
 知っておくとよい点:
 
@@ -135,7 +135,10 @@ git remote set-head <remote> --auto
 ```
 
 **`warning: couldn't fast-forward '<name>'`**
-チェックアウト中のブランチでローカルの変更が上書きされてしまうか、別の worktree でチェックアウトされています。変更を commit または stash してから、もう一度 `gh sync` を実行してください。
+チェックアウト中のブランチでローカルの変更が上書きされてしまいます。変更を commit または stash してから、もう一度 `gh sync` を実行してください。
+
+**`warning: '<name>' is checked out in another worktree (<path>); not updated`**(または `not deleted`)
+別の worktree でチェックアウトされているブランチは、git が移動も削除もさせません。その worktree で `git merge --ff-only` を実行するか、別のブランチに切り替えるか、`git worktree remove <path>` で削除してください。
 
 **`warning: '<name>' upstream config is broken; skipping`**
 `branch.<name>.merge` が無いか、不正です。次のコマンドで直してください。
@@ -152,7 +155,7 @@ git branch --set-upstream-to=<remote>/<branch> <name>
 ## 必要なもの
 
 - [GitHub CLI](https://cli.github.com/) 2.0 以降
-- Git
+- Git 2.23 以降
 
 ## 開発
 
