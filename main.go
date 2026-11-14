@@ -244,17 +244,32 @@ func getRemotes() ([]Remote, error) {
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
 
 	for _, line := range lines {
-		parts := strings.Fields(line)
-		if len(parts) >= 2 && strings.HasSuffix(line, "(fetch)") {
-			name := parts[0]
-			if !seen[name] {
-				seen[name] = true
-				remotes = append(remotes, Remote{Name: name, URL: parts[1]})
-			}
+		name, url, ok := parseFetchRemoteLine(line)
+		if ok && !seen[name] {
+			seen[name] = true
+			remotes = append(remotes, Remote{Name: name, URL: url})
 		}
 	}
 
 	return remotes, nil
+}
+
+// parseFetchRemoteLine parses one line of `git remote -v` and reports whether
+// it is a fetch line. The format is "<name>\t<url> (fetch)", and for a
+// promisor remote (partial clone) git appends the filter:
+// "<name>\t<url> (fetch) [blob:none]".
+func parseFetchRemoteLine(line string) (name, url string, ok bool) {
+	name, rest, found := strings.Cut(line, "\t")
+	if !found || name == "" {
+		return "", "", false
+	}
+	if i := strings.LastIndex(rest, " (fetch)"); i >= 0 {
+		tail := rest[i+len(" (fetch)"):]
+		if tail == "" || strings.HasPrefix(tail, " [") {
+			return name, rest[:i], true
+		}
+	}
+	return "", "", false
 }
 
 func getDefaultBranch(remote *Remote) (string, error) {

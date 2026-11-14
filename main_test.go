@@ -833,3 +833,70 @@ func TestRunIgnoresDanglingRemoteHead(t *testing.T) {
 		t.Error("local branch feature still exists")
 	}
 }
+
+// makePromisorRemote marks origin in the local clone as a promisor remote, as
+// `git clone --filter=blob:none` does. `git remote -v` then prints the filter
+// after "(fetch)" (e.g. "origin\t<url> (fetch) [blob:none]").
+func (f *syncFixture) makePromisorRemote() {
+	f.t.Helper()
+	f.localGit("config", "remote.origin.promisor", "true")
+	f.localGit("config", "remote.origin.partialclonefilter", "blob:none")
+}
+
+// TestGetRemotesPartialClone is the regression test for #56: getRemotes()
+// must still find a promisor remote.
+func TestGetRemotesPartialClone(t *testing.T) {
+	f := newSyncFixture(t)
+	f.makePromisorRemote()
+
+	remotes, err := getRemotes()
+	if err != nil {
+		t.Fatalf("getRemotes() error: %v", err)
+	}
+	if len(remotes) != 1 {
+		t.Fatalf("getRemotes() = %+v, want exactly origin", remotes)
+	}
+	if remotes[0].Name != "origin" || remotes[0].URL != f.remote {
+		t.Errorf("getRemotes()[0] = %+v, want {Name: origin, URL: %s}", remotes[0], f.remote)
+	}
+}
+
+// TestRunPartialClone checks that a sync completes in a partial clone (#56).
+func TestRunPartialClone(t *testing.T) {
+	f := newSyncFixture(t)
+	f.makePromisorRemote()
+	before := f.sha(f.local, "main")
+	f.advanceUpstream("main", "upstream-1")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch main (was %s).", before[:7]))
+	if got, want := f.sha(f.local, "main"), f.sha(f.upstream, "main"); got != want {
+		t.Errorf("local main = %s, want %s", got, want)
+	}
+}
+
+func TestParseFetchRemoteLine(t *testing.T) {
+	tests := []struct {
+		line     string
+		wantName string
+		wantURL  string
+		wantOK   bool
+	}{
+		{"origin\thttps://github.com/org/repo.git (fetch)", "origin", "https://github.com/org/repo.git", true},
+		{"origin\thttps://github.com/org/repo.git (push)", "", "", false},
+		{"origin\thttps://github.com/org/repo.git (fetch) [blob:none]", "origin", "https://github.com/org/repo.git", true},
+		{"origin\thttps://github.com/org/repo.git (fetch) [tree:0]", "origin", "https://github.com/org/repo.git", true},
+		{"local\t/path/with space/repo.git (fetch)", "local", "/path/with space/repo.git", true},
+		{"", "", "", false},
+	}
+	for _, tt := range tests {
+		name, url, ok := parseFetchRemoteLine(tt.line)
+		if name != tt.wantName || url != tt.wantURL || ok != tt.wantOK {
+			t.Errorf("parseFetchRemoteLine(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tt.line, name, url, ok, tt.wantName, tt.wantURL, tt.wantOK)
+		}
+	}
+}
