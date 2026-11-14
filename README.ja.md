@@ -88,6 +88,8 @@ gh-sync は位置引数を取りません。`gh sync dry-run`(`--` の付け忘�
 
 ### 色
 
+更新したブランチは緑、削除したブランチは赤、警告は黄、エラーは太字の赤で表示します。
+
 `--color=auto` では stdout と stderr を別々に判定し、それぞれ端末(Git Bash の MSYS2 / Cygwin 端末を含む)に接続されているときだけ色を付けます。そのため `gh sync | grep Updated` ではエスケープシーケンスが出力されず、端末に出る警告には色が付いたままになります。
 
 環境変数 [`NO_COLOR`](https://no-color.org) に空でない値を設定すると、`auto` では色が無効になります(空の `NO_COLOR=` は無視します)。`--color=always` はこれより優先されます。
