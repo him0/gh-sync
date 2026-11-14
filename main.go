@@ -328,8 +328,12 @@ func getBranchToRemoteMapping() (map[string]string, error) {
 	return branchToRemote, nil
 }
 
+// getLocalBranches lists the names of local branches. It uses for-each-ref
+// with lstrip=2 rather than `git branch --format=%(refname:short)`, which
+// prints "heads/<name>" when a tag has the same name and includes a
+// "(HEAD detached at ...)" line when HEAD is detached.
 func getLocalBranches() ([]string, error) {
-	output, err := gitOutput("branch", "--format=%(refname:short)")
+	output, err := gitOutput("for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/")
 	if err != nil {
 		return nil, err
 	}
