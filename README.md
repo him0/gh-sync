@@ -146,7 +146,7 @@ mise run lint    # go vet + gofmt check + golangci-lint
 gh extension install .     # or install the checkout as `gh sync`
 ```
 
-Pushing a `v*` tag builds the binaries for all platforms and publishes a release. See [CLAUDE.md](CLAUDE.md) for the architecture, CI and release details.
+Pushing a `v*` tag builds the binaries for all platforms and publishes a release. See [CLAUDE.md](CLAUDE.md) for the contribution rules that the code and config files don't spell out (keeping both READMEs in sync, pinning the golangci-lint version, updating the workflow lockfile).
 
 ## Acknowledgments
 

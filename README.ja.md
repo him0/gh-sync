@@ -146,7 +146,7 @@ mise run lint    # go vet、gofmt のチェック、golangci-lint
 gh extension install .     # またはチェックアウトを `gh sync` としてインストールする
 ```
 
-`v*` タグを push すると、全プラットフォーム向けのバイナリがビルドされ、リリースが公開されます。アーキテクチャ、CI、リリースの詳細は [CLAUDE.md](CLAUDE.md) を参照してください。
+`v*` タグを push すると、全プラットフォーム向けのバイナリがビルドされ、リリースが公開されます。コードや設定ファイルからは読み取れない開発上の決まり（README の両言語版の更新、golangci-lint のバージョン固定、workflow のロックファイルの更新）は [CLAUDE.md](CLAUDE.md) を参照してください。
 
 ## 謝辞
 
