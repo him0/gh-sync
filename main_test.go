@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -714,7 +716,7 @@ func TestRunRejectsPositionalArguments(t *testing.T) {
 				t.Fatal("run() error = nil, want an error")
 			}
 			assertContains(t, "stderr", res.stderr, fmt.Sprintf("fatal: unexpected argument: %q", tt.wantArg))
-			assertContains(t, "stderr", res.stderr, "Usage:")
+			assertContains(t, "stderr", res.stderr, "Usage: gh sync [options]")
 			if res.stdout != "" {
 				t.Errorf("stdout = %q, want empty", res.stdout)
 			}
@@ -730,3 +732,127 @@ func TestRunRejectsPositionalArguments(t *testing.T) {
 		})
 	}
 }
+
+// TestRunHelp checks that --help prints the usage to stdout, so
+// `gh sync --help | less` works, and does not sync (issue #63).
+func TestRunHelp(t *testing.T) {
+	f := newSyncFixture(t)
+	before := f.sha(f.local, "main")
+	f.advanceUpstream("main", "upstream-1")
+
+	res := f.sync("--help")
+	if !errors.Is(res.err, flag.ErrHelp) {
+		t.Fatalf("run() error = %v, want flag.ErrHelp", res.err)
+	}
+	if !strings.HasPrefix(res.stdout, "Usage: gh sync [options]\n") {
+		t.Errorf("stdout does not start with the usage line:\n%s", res.stdout)
+	}
+	assertContains(t, "stdout", res.stdout, "--dry-run")
+	if res.stderr != "" {
+		t.Errorf("stderr = %q, want empty", res.stderr)
+	}
+	if got := f.sha(f.local, "main"); got != before {
+		t.Errorf("local main moved to %s, want it left at %s", got, before)
+	}
+}
+
+// TestRunUnknownFlagPrintsUsageToStderr checks that a usage error keeps the
+// usage on stderr, after flag's own error message.
+func TestRunUnknownFlagPrintsUsageToStderr(t *testing.T) {
+	f := newSyncFixture(t)
+
+	res := f.sync("--bogus")
+	if res.err == nil || errors.Is(res.err, flag.ErrHelp) {
+		t.Fatalf("run() error = %v, want a usage error", res.err)
+	}
+	assertContains(t, "stderr", res.stderr, "flag provided but not defined: -bogus\nUsage: gh sync [options]\n")
+	if res.stdout != "" {
+		t.Errorf("stdout = %q, want empty", res.stdout)
+	}
+}
+
+// TestRunVerbosePrintsGitErrorOnce checks that a failing git command under
+// --verbose shows git's error only inside the warning, not a second time
+// right after the command line (issue #63).
+func TestRunVerbosePrintsGitErrorOnce(t *testing.T) {
+	f := newSyncFixture(t)
+	if err := os.WriteFile(filepath.Join(f.upstream, "f"), []byte("upstream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.upstreamGit("add", "f")
+	f.commit(f.upstream, "add f")
+	f.upstreamGit("push", "--quiet", "origin", "main")
+	// An untracked f in local makes `git merge --ff-only` refuse to run.
+	if err := os.WriteFile(filepath.Join(f.local, "f"), []byte("local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := f.sync("--verbose")
+	if res.err == nil {
+		t.Fatal("run() error = nil, want an error")
+	}
+	assertContains(t, "stderr", res.stderr, "$ git merge --ff-only --quiet refs/remotes/origin/main\nwarning: couldn't fast-forward 'main'")
+	if n := strings.Count(res.stderr, "would be overwritten by merge"); n != 1 {
+		t.Errorf("git's error appears %d times in stderr, want 1", n)
+	}
+}
+
+// TestRunGitStderr checks that runGitStderr leaves git's stderr on os.Stderr
+// and does not repeat it in the returned error.
+func TestRunGitStderr(t *testing.T) {
+	t.Chdir(setupTestRepo(t))
+	errFile, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	origErr := os.Stderr
+	os.Stderr = errFile
+	runErr := runGitStderr(runConfig{}, "rev-parse", "--verify", "--end-of-options", "refs/heads/nonexistent")
+	os.Stderr = origErr
+	if err := errFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stderr, err := os.ReadFile(errFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if runErr == nil {
+		t.Fatal("runGitStderr() error = nil, want an error")
+	}
+	assertContains(t, "stderr", string(stderr), "fatal:")
+	assertNotContains(t, "error", runErr.Error(), "fatal:")
+}
+
+// TestNoColorSet checks that NO_COLOR disables color only when it is set to a
+// non-empty value, as https://no-color.org specifies (issue #63).
+func TestNoColorSet(t *testing.T) {
+	tests := []struct {
+		name  string
+		value *string
+		want  bool
+	}{
+		{"unset", nil, false},
+		{"empty", ptr(""), false},
+		{"1", ptr("1"), true},
+		{"0", ptr("0"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// t.Setenv restores the original value (or absence) on cleanup.
+			t.Setenv("NO_COLOR", "")
+			if tt.value == nil {
+				if err := os.Unsetenv("NO_COLOR"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				t.Setenv("NO_COLOR", *tt.value)
+			}
+			if got := noColorSet(); got != tt.want {
+				t.Errorf("noColorSet() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }
