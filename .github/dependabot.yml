@@ -13,3 +13,13 @@ updates:
     # Let fresh releases settle before picking them up.
     cooldown:
       default-days: 7
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns:
+          - "*"
+    cooldown:
+      default-days: 7

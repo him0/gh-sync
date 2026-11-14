@@ -8,7 +8,7 @@ gh-sync is a GitHub CLI extension that brings every local branch up to date with
 
 ## Build and Development Commands
 
-Tasks are defined in `mise.toml` (tool versions are managed by mise; Go build/module caches live in `.cache/` inside the repository).
+Tasks are defined in `mise.toml` (tool versions are managed by mise; Go build/module caches live in `.cache/` inside the repository). mise takes the Go version from the `go` line in `go.mod` (`idiomatic_version_file_enable_tools = ["go"]` in `mise.toml`) and installs golangci-lint at the version pinned in `mise.toml`.
 
 ```bash
 # Build the binary
@@ -17,7 +17,7 @@ mise run build
 # Run tests
 mise run test
 
-# Run go vet and check gofmt
+# Run go vet, check gofmt and run golangci-lint (same version and config as CI)
 mise run lint
 
 # Run go mod tidy to update dependencies
@@ -70,7 +70,11 @@ GitHub Actions workflow (`.github/workflows/ci.yml`) runs on pushes to `main` an
 - `go test ./...` on ubuntu, macOS and Windows
 - `gofmt -l .` (fails if any file is unformatted), `go vet ./...` and golangci-lint on ubuntu
 
-The Go version comes from `go.mod` (`go-version-file`), so bumping Go only requires updating `go.mod`.
+`mise run lint` runs the same three checks locally. golangci-lint uses `.golangci.yml`, which lists the enabled linters (errcheck, govet, ineffassign, staticcheck, unused). Its version is pinned in two places, `version:` of the golangci-lint step in `ci.yml` and `golangci-lint` in `mise.toml`; update both together.
+
+The Go version comes from `go.mod` in both CI (`go-version-file`) and mise, so bumping Go only requires updating `go.mod`.
+
+Dependabot (`.github/dependabot.yml`) also bumps Go module dependencies weekly in one grouped PR, with the same 7-day cooldown as actions.
 
 ### Workflow lockfile
 

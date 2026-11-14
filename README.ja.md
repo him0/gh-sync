@@ -133,12 +133,12 @@ git branch --set-upstream-to=<remote>/<branch> <name>
 
 ## 開発
 
-ツールのバージョンとタスクは [mise](https://mise.jdx.dev/) で管理しています。
+ツールのバージョンとタスクは [mise](https://mise.jdx.dev/) で管理しています。Go のバージョンは `go.mod` から読み込み、golangci-lint は CI と同じバージョンに固定しています。
 
 ```bash
 mise run build   # ./gh-sync をビルドする
 mise run test    # go test ./...
-mise run lint    # go vet と gofmt のチェック
+mise run lint    # go vet、gofmt のチェック、golangci-lint
 
 ./gh-sync --verbose        # ローカルビルドを直接実行する
 gh extension install .     # またはチェックアウトを `gh sync` としてインストールする

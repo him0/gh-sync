@@ -1,0 +1,14 @@
+# golangci-lint v2 configuration, used by `mise run lint` and the CI Lint job.
+version: "2"
+
+linters:
+  # Enable linters explicitly instead of relying on the default set.
+  # These five are the golangci-lint v2 "standard" set that CI ran before
+  # this file existed.
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused

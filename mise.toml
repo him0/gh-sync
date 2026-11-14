@@ -1,5 +1,10 @@
+# Go comes from the `go` line in go.mod, so bumping Go only means editing go.mod.
+[settings]
+idiomatic_version_file_enable_tools = ["go"]
+
 [tools]
-go = "1.27.4"
+# Keep in sync with the golangci-lint version in .github/workflows/ci.yml.
+golangci-lint = "2.15.0"
 
 [tasks.build]
 description = "Build the gh-sync binary"
@@ -12,9 +17,10 @@ run = "go test ./..."
 env = { GOCACHE = "{{config_root}}/.cache/go-build", GOMODCACHE = "{{config_root}}/.cache/go-mod" }
 
 [tasks.lint]
-description = "Run go vet and check gofmt"
+description = "Run go vet, check gofmt and run golangci-lint"
 run = [
   "go vet ./...",
   "files=$(gofmt -l $(git ls-files --cached --others --exclude-standard '*.go')); if [ -n \"$files\" ]; then echo \"$files\"; echo 'gofmt: files above need formatting' >&2; exit 1; fi",
+  "golangci-lint run",
 ]
 env = { GOCACHE = "{{config_root}}/.cache/go-build", GOMODCACHE = "{{config_root}}/.cache/go-mod" }

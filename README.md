@@ -133,12 +133,12 @@ When reporting a bug, please include the output of `gh sync --version` and `gh s
 
 ## Development
 
-Tool versions and tasks are managed with [mise](https://mise.jdx.dev/).
+Tool versions and tasks are managed with [mise](https://mise.jdx.dev/). The Go version comes from `go.mod`, and golangci-lint is pinned to the version CI uses.
 
 ```bash
 mise run build   # build ./gh-sync
 mise run test    # go test ./...
-mise run lint    # go vet + gofmt check
+mise run lint    # go vet + gofmt check + golangci-lint
 
 ./gh-sync --verbose        # run the local build directly
 gh extension install .     # or install the checkout as `gh sync`
