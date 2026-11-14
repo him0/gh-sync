@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -186,7 +187,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		return err
 	}
 
-	remote, err := getMainRemote(remoteFlag)
+	remote, remotes, err := getMainRemote(remoteFlag)
 	if err != nil {
 		printError(cfg.stderrColors, "%s", err.Error())
 		return err
@@ -197,19 +198,32 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		currentBranch = branch
 	}
 
-	// --progress only shows something when git's stderr reaches the user, so
-	// pass it through when stderr is a terminal. Otherwise capture it as
-	// before, so a failure is reported once, inside the error below.
-	fetchArgs := []string{"fetch", "--prune", "--quiet", "--progress", remote.Name}
-	var fetchErr error
-	if stderrIsTerminal {
-		fetchErr = runGitStderr(cfg, fetchArgs...)
-	} else {
-		fetchErr = runGitSilent(cfg, fetchArgs...)
+	branchToRemote, err := getBranchToRemoteMapping()
+	if err != nil {
+		printError(cfg.stderrColors, "Failed to read branch tracking config: %s", err.Error())
+		return err
 	}
-	if err := fetchErr; err != nil {
+
+	if err := fetchRemote(cfg, remote.Name, stderrIsTerminal); err != nil {
 		printError(cfg.stderrColors, "Failed to fetch from %s: %s", remote.Name, err.Error())
 		return err
+	}
+
+	// Remotes that local branches track, such as a fork's origin when the
+	// main remote is upstream, are fetched too, so their branches can be
+	// updated and their deleted branches detected. A failure here only
+	// affects the branches tracking that remote: they are skipped.
+	hadFailure := false
+	fetched := map[string]bool{remote.Name: true}
+	failed := make(map[string]bool)
+	for _, r := range trackedRemotes(remotes, remote.Name, branchToRemote) {
+		if err := fetchRemote(cfg, r, stderrIsTerminal); err != nil {
+			printWarning(cfg.stderrColors, "couldn't fetch %s; skipping the branches that track it: %s", r, err.Error())
+			failed[r] = true
+			hadFailure = true
+			continue
+		}
+		fetched[r] = true
 	}
 
 	// Determined after the fetch so a remote that was never fetched has its
@@ -220,13 +234,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		return err
 	}
 
-	branchToRemote, err := getBranchToRemoteMapping()
-	if err != nil {
-		printError(cfg.stderrColors, "Failed to read branch tracking config: %s", err.Error())
-		return err
-	}
-
-	refs, err := readRefs(remote.Name)
+	refs, err := readRefs(slices.Sorted(maps.Keys(fetched)))
 	if err != nil {
 		printError(cfg.stderrColors, "Failed to get local branches: %s", err.Error())
 		return err
@@ -234,7 +242,6 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 
 	fullDefaultBranch := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, defaultBranch)
 
-	hadFailure := false
 	var candidates []squashCandidate
 	for _, branch := range refs.branches {
 		if pattern, ok := matchExclude(excludes, branch.name); ok {
@@ -243,7 +250,10 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 			}
 			continue
 		}
-		if perr := processBranch(cfg, branch, refs.remoteRefs, remote, branchToRemote, &currentBranch, defaultBranch, fullDefaultBranch, &candidates); perr != nil {
+		if failed[branchToRemote[branch.name]] {
+			continue
+		}
+		if perr := processBranch(cfg, branch, refs.remoteRefs, remote, fetched, branchToRemote, &currentBranch, defaultBranch, fullDefaultBranch, &candidates); perr != nil {
 			hadFailure = true
 		}
 	}
@@ -255,7 +265,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		for _, c := range candidates {
 			pr := merged[c.branch]
 			if pr == 0 {
-				printWarning(cfg.stderrColors, "'%s' was deleted on %s, but appears not merged into '%s'", c.branch, remote.Name, defaultBranch)
+				printWarning(cfg.stderrColors, "'%s' was deleted on %s, but appears not merged into '%s'", c.branch, branchToRemote[c.branch], defaultBranch)
 				continue
 			}
 			if derr := deleteBranch(cfg, c.branch, c.tip, c.worktreePath, fmt.Sprintf(", merged via #%d", pr), &currentBranch, remote.Name, defaultBranch); derr != nil {
@@ -268,6 +278,35 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		return fmt.Errorf("one or more branches failed to sync")
 	}
 	return nil
+}
+
+// fetchRemote runs `git fetch --prune` for name. --progress only shows
+// something when git's stderr reaches the user, so stderr is passed through
+// when it is a terminal. Otherwise it is captured, so a failure is reported
+// once, inside the returned error.
+func fetchRemote(cfg runConfig, name string, stderrIsTerminal bool) error {
+	args := []string{"fetch", "--prune", "--quiet", "--progress", name}
+	if stderrIsTerminal {
+		return runGitStderr(cfg, args...)
+	}
+	return runGitSilent(cfg, args...)
+}
+
+// trackedRemotes returns, sorted, the remotes other than main that some
+// local branch tracks. Values of branch.<name>.remote that are not a
+// configured remote (such as "." for a local upstream) are left out.
+func trackedRemotes(remotes []Remote, main string, branchToRemote map[string]string) []string {
+	known := make(map[string]bool, len(remotes))
+	for _, r := range remotes {
+		known[r.Name] = true
+	}
+	set := make(map[string]bool)
+	for _, r := range branchToRemote {
+		if r != main && known[r] {
+			set[r] = true
+		}
+	}
+	return slices.Sorted(maps.Keys(set))
 }
 
 // usageText is printed by --help and after usage errors.
@@ -391,39 +430,40 @@ func checkGitRepo() error {
 
 // getMainRemote returns the remote named name, or when name is empty the
 // first of upstream, github and origin that exists, else the first remote.
-func getMainRemote(name string) (*Remote, error) {
+// It also returns all remotes.
+func getMainRemote(name string) (*Remote, []Remote, error) {
 	// Priority order: upstream, github, origin, others
 	priorityOrder := []string{"upstream", "github", "origin"}
 
 	remotes, err := getRemotes()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if name != "" {
 		for _, remote := range remotes {
 			if remote.Name == name {
-				return &remote, nil
+				return &remote, remotes, nil
 			}
 		}
-		return nil, fmt.Errorf("fatal: no such remote '%s'", name)
+		return nil, nil, fmt.Errorf("fatal: no such remote '%s'", name)
 	}
 
 	if len(remotes) == 0 {
-		return nil, fmt.Errorf("no git remotes found")
+		return nil, nil, fmt.Errorf("no git remotes found")
 	}
 
 	// Check priority remotes first
 	for _, priority := range priorityOrder {
 		for _, remote := range remotes {
 			if remote.Name == priority {
-				return &remote, nil
+				return &remote, remotes, nil
 			}
 		}
 	}
 
 	// Return first remote if no priority match
-	return &remotes[0], nil
+	return &remotes[0], remotes, nil
 }
 
 func getRemotes() ([]Remote, error) {
@@ -567,10 +607,10 @@ type localBranch struct {
 }
 
 // refSnapshot is the state of the local branches and the main remote's
-// remote-tracking refs, read with one git call.
+// remote-tracking refs of the fetched remotes, read with one git call.
 type refSnapshot struct {
 	branches []localBranch
-	// remoteRefs holds the full names of the refs under refs/remotes/<remote>/.
+	// remoteRefs holds the full names of the remote-tracking refs read.
 	remoteRefs map[string]bool
 }
 
@@ -580,14 +620,18 @@ type refSnapshot struct {
 const refFormat = "%(refname)%00%(objectname)%00%(upstream)%00%(upstream:track)%00%(worktreepath)"
 
 // readRefs reads every local branch with its tip, upstream and ahead/behind
-// counts, and the remote-tracking refs of remote, with a single for-each-ref,
+// counts, and the remote-tracking refs of remotes, with a single for-each-ref,
 // instead of a few git calls per branch.
 //
 // It reads full ref names rather than `git branch --format=%(refname:short)`,
 // which prints "heads/<name>" when a tag has the same name and includes a
 // "(HEAD detached at ...)" line when HEAD is detached.
-func readRefs(remote string) (refSnapshot, error) {
-	cmd := exec.Command("git", "for-each-ref", "--format="+refFormat, "refs/heads/", "refs/remotes/"+remote+"/")
+func readRefs(remotes []string) (refSnapshot, error) {
+	args := []string{"for-each-ref", "--format=" + refFormat, "refs/heads/"}
+	for _, r := range remotes {
+		args = append(args, "refs/remotes/"+r+"/")
+	}
+	cmd := exec.Command("git", args...)
 	// %(upstream:track) is translated; the C locale keeps it parseable.
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	var stderr bytes.Buffer
@@ -599,13 +643,13 @@ func readRefs(remote string) (refSnapshot, error) {
 		}
 		return refSnapshot{}, err
 	}
-	return parseRefs(string(output), remote)
+	return parseRefs(string(output))
 }
 
 // parseRefs parses the output of for-each-ref with refFormat.
-func parseRefs(output, remote string) (refSnapshot, error) {
+func parseRefs(output string) (refSnapshot, error) {
 	snap := refSnapshot{remoteRefs: make(map[string]bool)}
-	remotePrefix := "refs/remotes/" + remote + "/"
+	remotePrefix := "refs/remotes/"
 	for line := range strings.SplitSeq(output, "\n") {
 		line = strings.TrimSuffix(line, "\r")
 		if line == "" {
@@ -671,7 +715,9 @@ func parseTrack(track string) (ahead, behind int, gone bool, err error) {
 	return ahead, behind, false, nil
 }
 
-// processBranch synchronizes a single local branch against the main remote.
+// processBranch synchronizes a single local branch: against its upstream when
+// it tracks the main remote or another fetched remote, otherwise against the
+// same-named branch on the main remote.
 // It returns a non-nil error when an operation it attempted failed (and was
 // announced to the user); branches that are simply skipped (no upstream
 // configured, already up to date, or diverged with unpushed commits) return
@@ -680,7 +726,7 @@ func parseTrack(track string) (ahead, behind int, gone bool, err error) {
 //
 // A gone branch whose commits are not in the default branch is appended to
 // candidates instead; run() decides on those after a pull request lookup.
-func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, remote *Remote, branchToRemote map[string]string, currentBranch *string, defaultBranch, fullDefaultBranch string, candidates *[]squashCandidate) error {
+func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, remote *Remote, fetched map[string]bool, branchToRemote map[string]string, currentBranch *string, defaultBranch, fullDefaultBranch string, candidates *[]squashCandidate) error {
 	branch := b.name
 	fullBranch := fmt.Sprintf("refs/heads/%s", branch)
 	sameName := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, branch)
@@ -691,7 +737,10 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 	counted := false
 	var ahead, behind int
 
-	if branchToRemote[branch] == remote.Name {
+	if tracked := branchToRemote[branch]; fetched[tracked] {
+		// The branch tracks the main remote or another remote fetched above
+		// (e.g. a fork's origin): compare it with its own upstream.
+		trackedSameName := fmt.Sprintf("refs/remotes/%s/%s", tracked, branch)
 		if b.upstream != "" && !b.gone {
 			remoteBranch = b.upstream
 			ahead, behind, counted = b.ahead, b.behind, true
@@ -699,7 +748,7 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 			// While a same-named remote branch still exists, a missing
 			// upstream points at broken config rather than a deleted branch:
 			// skip it, so a config typo can't lead to deleting it below.
-			if remoteRefs[sameName] {
+			if remoteRefs[trackedSameName] {
 				printWarning(cfg.stderrColors, "'%s' upstream config is broken; skipping", branch)
 				return nil
 			}
