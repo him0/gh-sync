@@ -226,6 +226,33 @@ func TestGetDefaultBranch(t *testing.T) {
 	}
 }
 
+// TestGetDefaultBranchDanglingHead checks that a refs/remotes/<remote>/HEAD
+// pointing at a ref that no longer exists is ignored in favor of main.
+func TestGetDefaultBranchDanglingHead(t *testing.T) {
+	dir := setupTestRepo(t)
+	t.Chdir(dir)
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("command %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	run("git", "update-ref", "refs/remotes/testremote/main", "HEAD")
+	run("git", "symbolic-ref", "refs/remotes/testremote/HEAD", "refs/remotes/testremote/master")
+
+	branch, err := getDefaultBranch(&Remote{Name: "testremote"})
+	if err != nil {
+		t.Fatalf("getDefaultBranch() error: %v", err)
+	}
+	if branch != "main" {
+		t.Errorf("getDefaultBranch() = %q, want %q", branch, "main")
+	}
+}
+
 func TestGetDefaultBranchMissingRemote(t *testing.T) {
 	dir := setupTestRepo(t)
 	t.Chdir(dir)
@@ -678,5 +705,57 @@ func TestRunUpToDateIsNoop(t *testing.T) {
 	}
 	if got := f.sha(f.local, "feature"); got != featureBefore {
 		t.Errorf("local feature = %s, want unchanged %s", got, featureBefore)
+	}
+}
+
+// TestRunBeforeFirstFetch checks that a remote that was added but never
+// fetched (no remote-tracking refs yet) can be synced: the default branch is
+// determined after the fetch that creates those refs.
+func TestRunBeforeFirstFetch(t *testing.T) {
+	f := newSyncFixture(t)
+	// Re-adding origin drops refs/remotes/origin/* (HEAD included) and the
+	// upstream config of main, as in `git init && git remote add origin <url>`.
+	f.localGit("remote", "remove", "origin")
+	f.localGit("remote", "add", "origin", f.remote)
+	before := f.sha(f.local, "main")
+	f.advanceUpstream("main", "upstream-1")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	assertNotContains(t, "stderr", res.stderr, "could not determine default branch")
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch main (was %s).", before[:7]))
+	if got, want := f.sha(f.local, "main"), f.sha(f.upstream, "main"); got != want {
+		t.Errorf("local main = %s, want %s", got, want)
+	}
+}
+
+// TestRunIgnoresDanglingRemoteHead checks that when refs/remotes/origin/HEAD
+// points at a branch that was pruned (the remote's default branch was renamed
+// from master to main), gh-sync falls back to main and still deletes merged
+// branches that are gone on the remote.
+func TestRunIgnoresDanglingRemoteHead(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushUpstreamBranch("master")
+	f.localGit("fetch", "--quiet", "origin")
+	f.localGit("remote", "set-head", "origin", "master")
+	f.pushUpstreamBranch("feature", "feature-1")
+	f.trackRemoteBranch("feature")
+	featureSHA := f.sha(f.local, "feature")
+
+	f.upstreamGit("merge", "--quiet", "--ff-only", "feature")
+	f.upstreamGit("push", "--quiet", "origin", "main")
+	f.deleteRemoteBranch("feature")
+	f.deleteRemoteBranch("master")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	assertNotContains(t, "stderr", res.stderr, "couldn't compare")
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature (was %s).", featureSHA[:7]))
+	if f.localBranchExists("feature") {
+		t.Error("local branch feature still exists")
 	}
 }

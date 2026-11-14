@@ -105,7 +105,7 @@ Updated branch main (was 3f2a1bc).
 ## トラブルシューティング
 
 **`could not determine default branch`**
-remote に `HEAD` の参照が無く、`main` も `master` もありません。次のコマンドで設定してください。
+fetch した後も、main remote に使える `HEAD` の参照が無く(参照が無いか、もう存在しないブランチを指している)、`main` も `master` もありません。次のコマンドで設定してください。
 
 ```bash
 git remote set-head <remote> --auto

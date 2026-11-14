@@ -105,7 +105,7 @@ Updated branch main (was 3f2a1bc).
 ## Troubleshooting
 
 **`could not determine default branch`**
-The remote has no `HEAD` reference and neither `main` nor `master`. Set it with:
+Even after the fetch, the main remote has no usable `HEAD` reference (it is missing, or points at a branch that no longer exists) and has neither `main` nor `master`. Set it with:
 
 ```bash
 git remote set-head <remote> --auto
