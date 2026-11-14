@@ -47,8 +47,8 @@ gh sync
 ### What it does
 
 1. **Picks the main remote.** The first one that exists out of `upstream`, `github`, `origin`; otherwise the first remote listed by git. In an ordinary clone that is `origin`. In a fork where you added an `upstream` remote, your branches are synced with the parent repository instead.
-2. **Fetches it** with `git fetch --prune`. When stderr is a terminal, git's fetch progress is shown there.
-3. **Walks every local branch** and compares it with its counterpart on the main remote: the configured upstream if the branch tracks that remote, otherwise the branch with the same name.
+2. **Fetches it** with `git fetch --prune`, together with every other remote that a local branch tracks (such as your fork's `origin` when the main remote is `upstream`). When stderr is a terminal, git's fetch progress is shown there. If one of those other remotes can't be fetched, gh-sync warns (`warning: couldn't fetch <remote>; skipping the branches that track it: ...`), skips the branches that track it and exits with `1`.
+3. **Walks every local branch** and compares it with its counterpart: the configured upstream if the branch tracks the main remote or one of the other fetched remotes, otherwise the branch with the same name on the main remote. Whether a branch is merged is always checked against the main remote's default branch.
 
 | State of the local branch | Action |
 | --- | --- |
@@ -66,7 +66,7 @@ gh sync
 gh-sync only ever moves branches forward or removes ones that are fully merged:
 
 - It never merges, rebases, force-updates or pushes. A branch with local-only commits is always left as is.
-- A branch is deleted only when it tracked a branch on the main remote, git pruned its remote-tracking ref for that branch (`%(upstream:track)` is `[gone]`), and either the local branch has no commits missing from the remote default branch or the head commit of a pull request merged into the default branch is exactly the local branch tip. Branches that never had an upstream are never deleted.
+- A branch is deleted only when it tracked a branch on a remote (the main remote, or e.g. your fork), git pruned its remote-tracking ref for that branch (`%(upstream:track)` is `[gone]`), and either the local branch has no commits missing from the remote default branch or the head commit of a pull request merged into the default branch is exactly the local branch tip. Branches that never had an upstream are never deleted.
 - These branches are looked up together after the other branches are processed, with one `gh api graphql` request per 50 branches against the main remote's repository, so their messages come last. When the lookup can't be done (`gh` not authenticated, a remote that is not on GitHub, an API error, no answer within 30 seconds), the branches are kept with the "appears not merged" warning; `--verbose` shows why. A branch with commits added after its pull request was merged is also kept.
 - If the branch being deleted is checked out, gh-sync switches to the default branch first and reports it as `Switched to branch ...`.
 - A branch checked out in another worktree is not moved.
@@ -99,7 +99,7 @@ Setting the [`NO_COLOR`](https://no-color.org) environment variable to a non-emp
 
 - `Updated branch ...`, `Switched to branch ...` and `Deleted branch ...` (`Would update branch ...`, `Would switch to branch ...` and `Would delete branch ...` with `--dry-run`) go to **stdout**.
 - Warnings, errors, `--verbose` logs and git's fetch progress go to **stderr**. A failing git command's message is printed once, inside the warning or error.
-- The exit status is `0` on success, including when branches were skipped with a warning, and `1` when gh-sync could not run (an unexpected argument, not a git repository, no remote, fetch failed) or an update or deletion failed.
+- The exit status is `0` on success, including when branches were skipped with a warning, and `1` when gh-sync could not run (an unexpected argument, not a git repository, no remote, fetch failed), or an update, a deletion or the fetch of another tracked remote failed.
 
 ```console
 $ gh sync --verbose

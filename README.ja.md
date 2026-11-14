@@ -47,8 +47,8 @@ gh sync
 ### 動作
 
 1. **main remote を決めます。** `upstream`、`github`、`origin` の順に探して最初に見つかったものを使い、どれも無ければ git が最初に列挙する remote を使います。通常の clone では `origin` です。fork に `upstream` を追加している場合は、代わりに親リポジトリと同期します。
-2. `git fetch --prune` で **その remote を fetch します。** stderr が端末のときは、fetch の進捗がそこに表示されます。
-3. **すべてのローカルブランチを順に調べ**、main remote 上の対応するブランチと比較します。ブランチがその remote を追跡していれば設定済みの upstream と、そうでなければ同名のブランチと比較します。
+2. `git fetch --prune` で **その remote を fetch します。** ローカルブランチが追跡しているほかの remote(main remote が `upstream` のときの fork の `origin` など)も一緒に fetch します。stderr が端末のときは、fetch の進捗がそこに表示されます。ほかの remote の fetch に失敗した場合は警告(`warning: couldn't fetch <remote>; skipping the branches that track it: ...`)を出し、その remote を追跡するブランチをスキップして、終了ステータスを `1` にします。
+3. **すべてのローカルブランチを順に調べ**、対応するブランチと比較します。main remote か、fetch したほかの remote を追跡していれば設定済みの upstream と、そうでなければ main remote 上の同名のブランチと比較します。マージ済みかどうかは、常に main remote のデフォルトブランチに対して判定します。
 
 | ローカルブランチの状態 | 動作 |
 | --- | --- |
@@ -66,7 +66,7 @@ gh sync
 gh-sync が行うのは、ブランチを前に進めることと、完全にマージ済みのブランチを削除することだけです。
 
 - merge、rebase、強制更新、push は一切しません。ローカルにしか無いコミットを持つブランチは必ずそのまま残ります。
-- ブランチを削除するのは、main remote 上のブランチを追跡していて、git がそのブランチの remote-tracking ref を prune しており(`%(upstream:track)` が `[gone]`)、かつリモートのデフォルトブランチに無いコミットを持たないか、デフォルトブランチにマージ済みの pull request の head コミットがローカルブランチの先頭と完全に一致する場合だけです。upstream を一度も設定していないブランチは削除しません。
+- ブランチを削除するのは、remote(main remote や fork など)のブランチを追跡していて、git がそのブランチの remote-tracking ref を prune しており(`%(upstream:track)` が `[gone]`)、かつリモートのデフォルトブランチに無いコミットを持たないか、デフォルトブランチにマージ済みの pull request の head コミットがローカルブランチの先頭と完全に一致する場合だけです。upstream を一度も設定していないブランチは削除しません。
 - こうしたブランチは、ほかのブランチの処理が終わったあとに、main remote のリポジトリに対する `gh api graphql` のリクエスト(50 本ごとに 1 回)でまとめて確認します。そのため、これらのメッセージは最後に出力されます。確認できない場合(`gh` が未認証、GitHub 以外の remote、API エラー、30 秒以内に応答が無い)は「appears not merged」の警告を出してブランチを残します。理由は `--verbose` で表示されます。pull request のマージ後にコミットを追加したブランチも残します。
 - 削除対象のブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替え、`Switched to branch ...` と表示します。
 - 別の worktree でチェックアウトされているブランチは動かしません。
@@ -99,7 +99,7 @@ gh-sync は位置引数を取りません。`gh sync dry-run`(`--` の付け忘�
 
 - `Updated branch ...`、`Switched to branch ...`、`Deleted branch ...`(`--dry-run` では `Would update branch ...`、`Would switch to branch ...`、`Would delete branch ...`)は **stdout** に出力されます。
 - 警告、エラー、`--verbose` のログ、git の fetch の進捗は **stderr** に出力されます。失敗した git コマンドのメッセージは、警告やエラーの中に 1 回だけ表示されます。
-- 終了ステータスは、成功時(警告を出してブランチをスキップした場合を含む)が `0`、実行できなかったとき(想定外の引数がある、git リポジトリではない、remote が無い、fetch に失敗した)や更新・削除に失敗したときが `1` です。
+- 終了ステータスは、成功時(警告を出してブランチをスキップした場合を含む)が `0`、実行できなかったとき(想定外の引数がある、git リポジトリではない、remote が無い、fetch に失敗した)や、更新・削除、追跡しているほかの remote の fetch に失敗したときが `1` です。
 
 ```console
 $ gh sync --verbose

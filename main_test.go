@@ -375,7 +375,7 @@ func TestReadRefsDetachedHead(t *testing.T) {
 	f.trackRemoteBranch("feature")
 	f.localGit("checkout", "--quiet", "--detach", "main")
 
-	refs, err := readRefs("origin")
+	refs, err := readRefs([]string{"origin"})
 	if err != nil {
 		t.Fatalf("readRefs() error: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestReadRefs(t *testing.T) {
 	f.deleteRemoteBranch("gone")
 	f.localGit("fetch", "--quiet", "--prune", "origin")
 
-	refs, err := readRefs("origin")
+	refs, err := readRefs([]string{"origin"})
 	if err != nil {
 		t.Fatalf("readRefs() error: %v", err)
 	}
@@ -1204,37 +1204,143 @@ func TestRunIgnoresBranchWithoutRemoteCounterpart(t *testing.T) {
 	f.assertBranchAt("local-only", before)
 }
 
-// TestRunIgnoresBranchTrackingOtherRemote checks that a branch tracking a
-// remote other than the main remote, with no same-named branch on the main
-// remote, is neither updated nor deleted, even though its own upstream has
-// moved and it is fully merged into the main remote's default branch.
-func TestRunIgnoresBranchTrackingOtherRemote(t *testing.T) {
-	f := newSyncFixture(t)
-	// A second remote "fork" with a branch "topic" that exists only there.
-	fork := filepath.Join(t.TempDir(), "fork.git")
+// addForkRemote adds a second remote "fork" to local (and upstream, which
+// pushes to it), as in a fork setup where the main remote is the parent
+// repository. gh-sync keeps using origin as the main remote. The fork starts
+// as a copy of the remote.
+func (f *syncFixture) addForkRemote() string {
+	f.t.Helper()
+	fork := filepath.Join(f.t.TempDir(), "fork.git")
 	f.gitIn(f.upstream, "clone", "--quiet", "--bare", f.remote, fork)
 	f.upstreamGit("remote", "add", "fork", fork)
-	f.upstreamGit("push", "--quiet", "fork", "main:topic")
 	f.localGit("remote", "add", "fork", fork)
-	f.localGit("fetch", "--quiet", "fork")
-	f.localGit("branch", "--quiet", "--track", "topic", "fork/topic")
-	before := f.sha(f.local, "topic")
-	// Move fork/topic forward, so a sync against the fork would fast-forward.
-	f.upstreamGit("checkout", "--quiet", "-b", "topic")
-	f.commit(f.upstream, "topic-1")
-	f.upstreamGit("push", "--quiet", "fork", "topic")
-	f.upstreamGit("checkout", "--quiet", "main")
-	// gh-sync fetches only the main remote; fetch the fork here so the moved
-	// fork/topic is visible locally.
-	f.localGit("fetch", "--quiet", "fork")
+	return fork
+}
 
-	res := f.sync()
-	if res.err != nil {
-		t.Fatalf("run() error: %v", res.err)
+// pushForkBranch creates branch on upstream from main with the given
+// commits, pushes it to the fork only, and creates a local branch tracking
+// fork/<branch>.
+func (f *syncFixture) pushForkBranch(branch string, commits ...string) {
+	f.t.Helper()
+	f.upstreamGit("checkout", "--quiet", "-b", branch, "main")
+	for _, msg := range commits {
+		f.commit(f.upstream, msg)
 	}
-	assertNotContains(t, "stdout", res.stdout, "topic")
-	assertNotContains(t, "stderr", res.stderr, "topic")
-	f.assertBranchAt("topic", before)
+	f.upstreamGit("push", "--quiet", "fork", branch)
+	f.upstreamGit("checkout", "--quiet", "main")
+	f.localGit("fetch", "--quiet", "fork")
+	f.localGit("branch", "--quiet", "--track", branch, "fork/"+branch)
+}
+
+// TestRunSyncsBranchTrackingOtherRemote checks that a branch tracking a
+// remote other than the main remote (a fork's origin when the main remote is
+// upstream) is synced against its own upstream: the other remote is fetched,
+// the branch is fast-forwarded when its upstream moved, and it is deleted
+// when its upstream was deleted and it is merged into the main remote's
+// default branch.
+func TestRunSyncsBranchTrackingOtherRemote(t *testing.T) {
+	t.Run("fast-forward", func(t *testing.T) {
+		f := newSyncFixture(t)
+		f.addForkRemote()
+		f.pushForkBranch("topic", "topic-1")
+		before := f.sha(f.local, "topic")
+		// The fork's topic moves on; local has not fetched it yet.
+		f.upstreamGit("checkout", "--quiet", "topic")
+		f.commit(f.upstream, "topic-2")
+		f.upstreamGit("push", "--quiet", "fork", "topic")
+		f.upstreamGit("checkout", "--quiet", "main")
+
+		res := f.sync()
+		if res.err != nil {
+			t.Fatalf("run() error: %v", res.err)
+		}
+		assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch topic (was %s).", shortSHA(before)))
+		if got, want := f.sha(f.local, "topic"), f.sha(f.upstream, "topic"); got != want {
+			t.Errorf("local topic = %s, want %s", got, want)
+		}
+	})
+
+	t.Run("merged and deleted on the fork", func(t *testing.T) {
+		f := newSyncFixture(t)
+		f.addForkRemote()
+		f.pushForkBranch("topic", "topic-1")
+		before := f.sha(f.local, "topic")
+		// Merged into the main remote's default branch, then deleted on the
+		// fork, as after a merged pull request from the fork.
+		f.mergeIntoUpstreamMain("topic")
+		f.upstreamGit("push", "--quiet", "fork", "--delete", "topic")
+
+		res := f.sync()
+		if res.err != nil {
+			t.Fatalf("run() error: %v", res.err)
+		}
+		assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch topic (was %s).", shortSHA(before)))
+		if f.localBranchExists("topic") {
+			t.Error("local branch topic still exists")
+		}
+	})
+
+	t.Run("unmerged and deleted on the fork", func(t *testing.T) {
+		f := newSyncFixture(t)
+		f.addForkRemote()
+		f.pushForkBranch("topic", "topic-1")
+		before := f.sha(f.local, "topic")
+		f.upstreamGit("push", "--quiet", "fork", "--delete", "topic")
+
+		res := f.sync()
+		if res.err != nil {
+			t.Fatalf("run() error: %v", res.err)
+		}
+		assertContains(t, "stderr", res.stderr, "warning: 'topic' was deleted on fork, but appears not merged into 'main'")
+		f.assertBranchAt("topic", before)
+	})
+
+	// A same-named branch on the main remote is not used for a branch that
+	// tracks another remote: its own upstream decides.
+	t.Run("same-named branch on the main remote", func(t *testing.T) {
+		f := newSyncFixture(t)
+		f.addForkRemote()
+		f.pushForkBranch("topic", "topic-1")
+		before := f.sha(f.local, "topic")
+		f.pushUpstreamBranch("other", "other-1")
+		f.upstreamGit("push", "--quiet", "origin", "other:topic")
+
+		res := f.sync()
+		if res.err != nil {
+			t.Fatalf("run() error: %v", res.err)
+		}
+		assertNotContains(t, "stdout", res.stdout, "topic")
+		assertNotContains(t, "stderr", res.stderr, "topic")
+		f.assertBranchAt("topic", before)
+	})
+
+	// When the other remote can't be fetched, its branches are skipped with
+	// a warning and the exit status is 1; the main remote's branches are
+	// still synced.
+	t.Run("fetch fails", func(t *testing.T) {
+		f := newSyncFixture(t)
+		fork := f.addForkRemote()
+		f.pushForkBranch("topic", "topic-1")
+		before := f.sha(f.local, "topic")
+		// Deleted on the fork and merged: a successful fetch would delete it.
+		f.mergeIntoUpstreamMain("topic")
+		if err := os.RemoveAll(fork); err != nil {
+			t.Fatal(err)
+		}
+		f.pushUpstreamBranch("feature", "feature-1")
+		f.trackRemoteBranch("feature")
+		featureBefore := f.sha(f.local, "feature")
+		f.advanceUpstream("feature", "feature-2")
+
+		res := f.sync()
+		if res.err == nil {
+			t.Fatal("run() error = nil, want an error")
+		}
+		assertContains(t, "stderr", res.stderr, "warning: couldn't fetch fork; skipping the branches that track it:")
+		assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch feature (was %s).", shortSHA(featureBefore)))
+		assertNotContains(t, "stdout", res.stdout, "topic")
+		f.assertBranchAt("topic", before)
+	})
 }
 
 // TestRunSkipsBrokenUpstreamConfig checks that a branch whose
