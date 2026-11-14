@@ -539,7 +539,15 @@ func TestRunDeletesMergedGoneBranch(t *testing.T) {
 			if res.err != nil {
 				t.Fatalf("run() error: %v", res.err)
 			}
-			assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature (was %s).", featureSHA[:7]))
+			deleted := fmt.Sprintf("Deleted branch feature (was %s).", featureSHA[:7])
+			if checkedOut {
+				// The checkout of the default branch is announced right
+				// before the deletion.
+				assertContains(t, "stdout", res.stdout, "Switched to branch main.\n"+deleted)
+			} else {
+				assertContains(t, "stdout", res.stdout, deleted)
+				assertNotContains(t, "stdout", res.stdout, "Switched to branch")
+			}
 			if f.localBranchExists("feature") {
 				t.Error("local branch feature still exists")
 			}
