@@ -537,9 +537,7 @@ func TestRunDeletesSquashMergedBranch(t *testing.T) {
 			assertNotContains(t, "stderr", res.stderr, "appears not merged")
 
 			if tt.dryRun {
-				if !f.localBranchExists(tt.local) {
-					t.Errorf("--dry-run deleted %s", tt.local)
-				}
+				f.assertBranchAt(tt.local, tip)
 				if f.currentBranch() != tt.local {
 					t.Errorf("current branch = %q, want %s", f.currentBranch(), tt.local)
 				}
@@ -591,9 +589,8 @@ func TestRunLooksUpSquashMergedBranchesTogether(t *testing.T) {
 	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature-a (was %s, merged via #1).", tipA[:7]))
 	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature-b (was %s, merged via #2).", tipB[:7]))
 	assertContains(t, "stderr", res.stderr, "warning: 'feature-c' was deleted on origin, but appears not merged into 'main'")
-	if !f.localBranchExists("feature-c") {
-		t.Error("feature-c without a merged pull request was deleted")
-	}
+	// feature-c has no merged pull request and must be kept.
+	f.assertBranchAt("feature-c", f.sha(f.upstream, "feature-c"))
 }
 
 // TestRunKeepsSquashMergedBranchWithoutPR checks the fallback: when no merged
@@ -643,9 +640,7 @@ func TestRunKeepsSquashMergedBranchWithoutPR(t *testing.T) {
 			} else {
 				assertNotContains(t, "stderr", res.stderr, "note: couldn't look up")
 			}
-			if got := f.sha(f.local, "feature"); got != tip {
-				t.Errorf("local feature = %s, want unchanged %s", got, tip)
-			}
+			f.assertBranchAt("feature", tip)
 		})
 	}
 }
@@ -701,18 +696,6 @@ func TestParseMergedPRResponse(t *testing.T) {
 		if _, err := parseMergedPRResponse([]byte(output), heads); err == nil {
 			t.Errorf("%s: want error", name)
 		}
-	}
-}
-
-func TestMatchMergedPR(t *testing.T) {
-	prs := []mergedPR{{Number: 12, HeadRefOid: "aaaa"}, {Number: 34, HeadRefOid: "bbbb"}}
-	if got := matchMergedPR(prs, "bbbb"); got != 34 {
-		t.Errorf("matchMergedPR(matching head) = %d, want 34", got)
-	}
-	// A merged pull request whose head differs (commits were added after
-	// the merge) must not count.
-	if got := matchMergedPR(prs, "cccc"); got != 0 {
-		t.Errorf("matchMergedPR(no matching head) = %d, want 0", got)
 	}
 }
 
