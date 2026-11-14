@@ -88,6 +88,8 @@ gh-sync takes no positional arguments. Anything that is not an option, such as `
 
 ### Color
 
+Updated branches are shown in green, deleted branches in red, warnings in yellow and errors in bold red.
+
 With `--color=auto`, stdout and stderr are decided independently: each stream is colorized only when it is a terminal (the MSYS2 / Cygwin terminal of Git Bash counts as one). `gh sync | grep Updated` therefore emits no escape sequences even though warnings on the terminal stay colored.
 
 Setting the [`NO_COLOR`](https://no-color.org) environment variable to a non-empty value disables color in `auto` mode (an empty `NO_COLOR=` is ignored). `--color=always` overrides it.

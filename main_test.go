@@ -850,6 +850,33 @@ func TestRunWarnsOnUnpushedCommits(t *testing.T) {
 	}
 }
 
+// TestRunColorsWarnings checks that warnings are yellow when stderr is
+// colorized and plain otherwise, like errors are light red.
+func TestRunColorsWarnings(t *testing.T) {
+	tests := []struct {
+		color string
+		want  string
+	}{
+		{"always", "\033[33mwarning: 'main' seems to contain unpushed commits\033[0m\n"},
+		{"never", "warning: 'main' seems to contain unpushed commits\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.color, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.commit(f.local, "local-only")
+
+			res := f.sync("--color=" + tt.color)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			assertContains(t, "stderr", res.stderr, tt.want)
+			if tt.color == "never" {
+				assertNotContains(t, "stderr", res.stderr, "\033[")
+			}
+		})
+	}
+}
+
 func TestRunUpToDateIsNoop(t *testing.T) {
 	f := newSyncFixture(t)
 	f.pushUpstreamBranch("feature", "feature-1")

@@ -38,6 +38,7 @@ type colorConfig struct {
 	lightGreen string
 	red        string
 	lightRed   string
+	yellow     string
 	magenta    string
 	reset      string
 }
@@ -53,6 +54,7 @@ func newColorConfig(enabled bool) colorConfig {
 		lightGreen: "\033[32;1m",
 		red:        "\033[31m",
 		lightRed:   "\033[31;1m",
+		yellow:     "\033[33m",
 		magenta:    "\033[35m",
 		reset:      "\033[0m",
 	}
@@ -231,7 +233,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		for _, c := range candidates {
 			pr := merged[c.branch]
 			if pr == 0 {
-				fmt.Fprintf(os.Stderr, "warning: '%s' was deleted on %s, but appears not merged into '%s'\n", c.branch, remote.Name, defaultBranch)
+				printWarning(cfg.stderrColors, "'%s' was deleted on %s, but appears not merged into '%s'", c.branch, remote.Name, defaultBranch)
 				continue
 			}
 			if derr := deleteBranch(cfg, c.branch, c.tip, fmt.Sprintf(", merged via #%d", pr), &currentBranch, remote.Name, defaultBranch); derr != nil {
@@ -497,7 +499,7 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 			// config typo.
 			candidate := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, branch)
 			if hasRemoteBranch(candidate) {
-				fmt.Fprintf(os.Stderr, "warning: '%s' upstream config is broken; skipping\n", branch)
+				printWarning(cfg.stderrColors, "'%s' upstream config is broken; skipping", branch)
 				return nil
 			}
 			remoteBranch = ""
@@ -518,7 +520,7 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 	if remoteBranch != "" {
 		ahead, behind, err := getCommitDifference(fullBranch, remoteBranch)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: couldn't compare '%s' against '%s': %s\n", branch, remoteBranch, err.Error())
+			printWarning(cfg.stderrColors, "couldn't compare '%s' against '%s': %s", branch, remoteBranch, err.Error())
 			return err
 		}
 		switch {
@@ -540,12 +542,12 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 				updateErr = runGitSilent(cfg, "branch", "-f", branch, remoteBranch)
 			}
 			if updateErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: couldn't fast-forward '%s': %s\n", branch, updateErr.Error())
+				printWarning(cfg.stderrColors, "couldn't fast-forward '%s': %s", branch, updateErr.Error())
 				return updateErr
 			}
 			fmt.Printf("%sUpdated branch %s%s%s (was %s).\n", cfg.stdoutColors.green, cfg.stdoutColors.lightGreen, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
 		default:
-			fmt.Fprintf(os.Stderr, "warning: '%s' seems to contain unpushed commits\n", branch)
+			printWarning(cfg.stderrColors, "'%s' seems to contain unpushed commits", branch)
 		}
 		return nil
 	}
@@ -556,7 +558,7 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 
 	ahead, _, err := getCommitDifference(fullBranch, fullDefaultBranch)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: couldn't compare '%s' against '%s': %s\n", branch, fullDefaultBranch, err.Error())
+		printWarning(cfg.stderrColors, "couldn't compare '%s' against '%s': %s", branch, fullDefaultBranch, err.Error())
 		return err
 	}
 	oldCommit := getCommitSHA(fullBranch)
@@ -578,7 +580,7 @@ func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch
 			fmt.Printf("Would switch to branch %s.\n", defaultBranch)
 		} else {
 			if err := runGitSilent(cfg, checkoutDefaultBranchArgs(remoteName, defaultBranch)...); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: couldn't checkout '%s': %s\n", defaultBranch, err.Error())
+				printWarning(cfg.stderrColors, "couldn't checkout '%s': %s", defaultBranch, err.Error())
 				return err
 			}
 			fmt.Printf("Switched to branch %s.\n", defaultBranch)
@@ -592,7 +594,7 @@ func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch
 		return nil
 	}
 	if err := runGitSilent(cfg, "branch", "-D", branch); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: couldn't delete '%s': %s\n", branch, err.Error())
+		printWarning(cfg.stderrColors, "couldn't delete '%s': %s", branch, err.Error())
 		return err
 	}
 	fmt.Printf("%sDeleted branch %s%s%s (was %s%s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit), reason)
@@ -956,4 +958,10 @@ func colorizeOutput(flag string, isTerminal, noColor bool) bool {
 
 func printError(colors colorConfig, format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "%s%s%s\n", colors.lightRed, fmt.Sprintf(format, args...), colors.reset)
+}
+
+// printWarning prints "warning: <message>" to stderr, in yellow when colors
+// are enabled.
+func printWarning(colors colorConfig, format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "%swarning: %s%s\n", colors.yellow, fmt.Sprintf(format, args...), colors.reset)
 }
