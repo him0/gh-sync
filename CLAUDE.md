@@ -63,7 +63,7 @@ The entire application is contained in a single `main.go` file with the followin
 1. **Command Line Parsing**: Uses Go's `flag` package for --verbose, --dry-run and --color options; positional arguments are rejected with `fatal: unexpected argument: ...` and the usage, without syncing
 2. **Verbose Logging**: Shows git commands in `$ git command args` format with magenta color
 3. **Color Output**: Uses ANSI escape codes with per-stream isatty detection (`runConfig` holds separate `stdoutColors` / `stderrColors`)
-4. **Default Branch Detection**: Checks remote/HEAD first, then tries main, then master, defaulting to main
+4. **Default Branch Detection**: Runs after `git fetch`. Uses `refs/remotes/<remote>/HEAD` if the ref it points at exists, then tries main, then master; if none is found, exits with an error suggesting `git remote set-head <remote> --auto`
 5. **Error Handling**: All errors exit with status code 1 and colored error messages to stderr
 
 ## CI
