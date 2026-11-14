@@ -15,6 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      # Builds for the action's default platforms, names assets <os>-<arch>[.exe],
+      # generates release notes and publishes tags containing '-' as prereleases.
       - uses: cli/gh-extension-precompile@v2.2.0
         with:
           go_version_file: go.mod
