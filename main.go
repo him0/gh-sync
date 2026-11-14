@@ -138,12 +138,6 @@ func run(args []string) error {
 		return err
 	}
 
-	defaultBranch, err := getDefaultBranch(remote)
-	if err != nil {
-		printError(cfg.stderrColors, "Failed to determine default branch for %s: %s", remote.Name, err.Error())
-		return err
-	}
-
 	currentBranch := ""
 	if branch, err := getCurrentBranch(); err == nil {
 		currentBranch = branch
@@ -151,6 +145,14 @@ func run(args []string) error {
 
 	if err := runGitSilent(cfg, "fetch", "--prune", "--quiet", "--progress", remote.Name); err != nil {
 		printError(cfg.stderrColors, "Failed to fetch from %s: %s", remote.Name, err.Error())
+		return err
+	}
+
+	// Determined after the fetch so a remote that was never fetched has its
+	// remote-tracking refs, and refs pruned by the fetch are not trusted.
+	defaultBranch, err := getDefaultBranch(remote)
+	if err != nil {
+		printError(cfg.stderrColors, "Failed to determine default branch for %s: %s", remote.Name, err.Error())
 		return err
 	}
 
@@ -256,12 +258,15 @@ func getRemotes() ([]Remote, error) {
 }
 
 func getDefaultBranch(remote *Remote) (string, error) {
-	// Try to get symbolic ref for remote HEAD first
+	// Try to get symbolic ref for remote HEAD first. The ref it points at may
+	// have been pruned (e.g. the default branch was renamed on the remote, and
+	// `git fetch --prune` does not update HEAD), so it is only trusted when the
+	// target still exists.
 	output, err := gitOutput("symbolic-ref", fmt.Sprintf("refs/remotes/%s/HEAD", remote.Name))
 	if err == nil {
 		ref := strings.TrimSpace(string(output))
 		prefix := fmt.Sprintf("refs/remotes/%s/", remote.Name)
-		if strings.HasPrefix(ref, prefix) {
+		if strings.HasPrefix(ref, prefix) && hasRemoteBranch(ref) {
 			return strings.TrimPrefix(ref, prefix), nil
 		}
 	}
