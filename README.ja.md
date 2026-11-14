@@ -46,7 +46,7 @@ gh sync
 
 ### 動作
 
-1. **main remote を決めます。** `upstream`、`github`、`origin` の順に探して最初に見つかったものを使い、どれも無ければ git が最初に列挙する remote を使います。通常の clone では `origin` です。fork に `upstream` を追加している場合は、代わりに親リポジトリと同期します。
+1. **main remote を決めます。** `--remote` で指定した remote を使います。指定が無ければ `upstream`、`github`、`origin` の順に探して最初に見つかったものを使い、どれも無ければ git が最初に列挙する remote を使います。通常の clone では `origin` です。fork に `upstream` を追加している場合は、代わりに親リポジトリと同期します。
 2. `git fetch --prune` で **その remote を fetch します。** stderr が端末のときは、fetch の進捗がそこに表示されます。
 3. **すべてのローカルブランチを順に調べ**、main remote 上の対応するブランチと比較します。ブランチがその remote を追跡していれば設定済みの upstream と、そうでなければ同名のブランチと比較します。
 
@@ -81,6 +81,7 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 | `--verbose` | 変更を伴う git コマンドと、マージ済み pull request を検索する `gh` コマンドを、`$ git ...` / `$ gh ...` の形式で stderr に表示する(hub の `HUB_VERBOSE=1` 相当) |
 | `--dry-run` | 更新・削除されるブランチを表示する(`Would update branch ...`、`Would delete branch ...`。チェックアウト中のブランチが削除される場合は、その前に `Would switch to branch ...`)だけで、ローカルブランチは変更しない。fetch は実行する |
 | `--color=WHEN` | 出力に色を付ける: `auto`(デフォルト)、`always`、`never` |
+| `--remote=NAME` | main remote を自動で選ばず、`NAME` を使う。その名前の remote が無ければエラーになる |
 | `--version` | gh-sync のバージョンを表示して終了する |
 | `--help` | 使い方を stdout に表示する |
 
@@ -125,7 +126,7 @@ git branch --set-upstream-to=<remote>/<branch> <name>
 ```
 
 **意図しない remote が使われる**
-優先順位は `upstream`、`github`、`origin` で固定です。これに合わせて remote の名前を変更してください(`git remote rename <old> upstream`)。
+`--remote` を指定しない場合の優先順位は `upstream`、`github`、`origin` です。使う remote を `--remote` で指定するか(`gh sync --remote=fork`)、これに合わせて remote の名前を変更してください(`git remote rename <old> upstream`)。
 
 バグを報告するときは、`gh sync --version` と `gh sync --verbose` の出力を添えてください。
 

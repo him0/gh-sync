@@ -113,11 +113,13 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		verbose     bool
 		dryRun      bool
 		colorFlag   string
+		remoteFlag  string
 		showVersion bool
 	)
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
 	fs.BoolVar(&dryRun, "dry-run", false, "show what would be updated or deleted without changing branches")
 	fs.StringVar(&colorFlag, "color", "auto", "colorize output (always, never, auto)")
+	fs.StringVar(&remoteFlag, "remote", "", "sync against this remote instead of the automatically chosen one")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	// fs.Parse calls fs.Usage both for --help and for parse errors, so it
 	// cannot tell which stream to use. Print the usage after Parse instead:
@@ -168,7 +170,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		return err
 	}
 
-	remote, err := getMainRemote()
+	remote, err := getMainRemote(remoteFlag)
 	if err != nil {
 		printError(cfg.stderrColors, "%s", err.Error())
 		return err
@@ -256,6 +258,8 @@ Options:
         show what would be updated or deleted without changing branches
   --color string
         colorize output (always, never, auto) (default "auto")
+  --remote name
+        sync against this remote instead of the automatically chosen one
   --version
         print version and exit
 `
@@ -302,13 +306,24 @@ func checkGitRepo() error {
 	return cmd.Run()
 }
 
-func getMainRemote() (*Remote, error) {
+// getMainRemote returns the remote named name, or when name is empty the
+// first of upstream, github and origin that exists, else the first remote.
+func getMainRemote(name string) (*Remote, error) {
 	// Priority order: upstream, github, origin, others
 	priorityOrder := []string{"upstream", "github", "origin"}
 
 	remotes, err := getRemotes()
 	if err != nil {
 		return nil, err
+	}
+
+	if name != "" {
+		for _, remote := range remotes {
+			if remote.Name == name {
+				return &remote, nil
+			}
+		}
+		return nil, fmt.Errorf("fatal: no such remote '%s'", name)
 	}
 
 	if len(remotes) == 0 {
