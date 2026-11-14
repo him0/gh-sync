@@ -236,7 +236,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 				printWarning(cfg.stderrColors, "'%s' was deleted on %s, but appears not merged into '%s'", c.branch, remote.Name, defaultBranch)
 				continue
 			}
-			if derr := deleteBranch(cfg, c.branch, c.tip, fmt.Sprintf(", merged via #%d", pr), &currentBranch, defaultBranch); derr != nil {
+			if derr := deleteBranch(cfg, c.branch, c.tip, fmt.Sprintf(", merged via #%d", pr), &currentBranch, remote.Name, defaultBranch); derr != nil {
 				hadFailure = true
 			}
 		}
@@ -568,18 +568,18 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 		*candidates = append(*candidates, squashCandidate{branch: branch, tip: oldCommit})
 		return nil
 	}
-	return deleteBranch(cfg, branch, oldCommit, "", currentBranch, defaultBranch)
+	return deleteBranch(cfg, branch, oldCommit, "", currentBranch, remote.Name, defaultBranch)
 }
 
 // deleteBranch deletes branch, checking out defaultBranch first when branch
 // is checked out. reason is appended to the "(was <sha>" part of the message.
 // With --dry-run it only reports what it would do.
-func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch *string, defaultBranch string) error {
+func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch *string, remoteName, defaultBranch string) error {
 	if branch == *currentBranch {
 		if cfg.dryRun {
 			fmt.Printf("Would switch to branch %s.\n", defaultBranch)
 		} else {
-			if err := runGitSilent(cfg, "checkout", "--quiet", defaultBranch); err != nil {
+			if err := runGitSilent(cfg, checkoutDefaultBranchArgs(remoteName, defaultBranch)...); err != nil {
 				printWarning(cfg.stderrColors, "couldn't checkout '%s': %s", defaultBranch, err.Error())
 				return err
 			}
@@ -599,6 +599,18 @@ func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch
 	}
 	fmt.Printf("%sDeleted branch %s%s%s (was %s%s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit), reason)
 	return nil
+}
+
+// checkoutDefaultBranchArgs returns the git arguments that switch to
+// defaultBranch. Without a local branch of that name, a plain checkout makes
+// git guess the remote-tracking branch to create it from, which fails when
+// several remotes have one (a fork with origin and upstream). The local branch
+// is then created explicitly from the main remote instead.
+func checkoutDefaultBranchArgs(remoteName, defaultBranch string) []string {
+	if hasRemoteBranch("refs/heads/" + defaultBranch) {
+		return []string{"checkout", "--quiet", defaultBranch}
+	}
+	return []string{"checkout", "--quiet", "-b", defaultBranch, "--track", "refs/remotes/" + remoteName + "/" + defaultBranch}
 }
 
 // squashCandidate is a gone branch whose commits are not in the default
