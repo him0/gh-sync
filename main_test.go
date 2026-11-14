@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -85,9 +86,9 @@ type syncFixture struct {
 	remote   string // bare repo; the "origin" of local
 	local    string // repo gh-sync operates on (also the test's CWD)
 
-	// findMergedPR is passed to run(). It defaults to a finder that always
+	// findMergedPRs is passed to run(). It defaults to a finder that always
 	// fails, so tests never call gh; tests of the pull request path replace it.
-	findMergedPR mergedPRFinder
+	findMergedPRs mergedPRFinder
 }
 
 // newSyncFixture creates the fixture and chdirs into the local clone, so a
@@ -101,8 +102,8 @@ func newSyncFixture(t *testing.T) *syncFixture {
 		upstream: upstream,
 		remote:   filepath.Join(base, "remote.git"),
 		local:    filepath.Join(base, "local"),
-		findMergedPR: func(Remote, Remote, string, string) (int, error) {
-			return 0, errors.New("pull request lookup is not stubbed in this test")
+		findMergedPRs: func(runConfig, Remote, string, []string) (map[string][]mergedPR, error) {
+			return nil, errors.New("pull request lookup is not stubbed in this test")
 		},
 	}
 	f.gitIn(base, "clone", "--quiet", "--bare", upstream, f.remote)
@@ -232,7 +233,7 @@ func (f *syncFixture) sync(extraArgs ...string) syncResult {
 	}
 	origOut, origErr := os.Stdout, os.Stderr
 	os.Stdout, os.Stderr = outFile, errFile
-	runErr := run(args, f.findMergedPR)
+	runErr := run(args, f.findMergedPRs)
 	os.Stdout, os.Stderr = origOut, origErr
 
 	read := func(file *os.File) string {
@@ -456,9 +457,24 @@ func (f *syncFixture) squashMergeAndDelete(branch string) {
 	f.deleteRemoteBranch(branch)
 }
 
-// prQuery records the arguments a mergedPRFinder was called with.
-type prQuery struct {
-	base, head, headBranch, tip string
+// prLookup records the arguments a mergedPRFinder was called with.
+type prLookup struct {
+	remote string
+	base   string
+	heads  []string
+}
+
+// stubMergedPRs returns a finder that answers from prs (keyed by remote
+// branch name) and records every call in calls.
+func stubMergedPRs(prs map[string][]mergedPR, calls *[]prLookup) mergedPRFinder {
+	return func(_ runConfig, remote Remote, base string, heads []string) (map[string][]mergedPR, error) {
+		*calls = append(*calls, prLookup{remote: remote.Name, base: base, heads: slices.Clone(heads)})
+		found := make(map[string][]mergedPR)
+		for _, h := range heads {
+			found[h] = prs[h]
+		}
+		return found, nil
+	}
 }
 
 func TestRunDeletesSquashMergedBranch(t *testing.T) {
@@ -486,14 +502,12 @@ func TestRunDeletesSquashMergedBranch(t *testing.T) {
 			}
 			f.squashMergeAndDelete("feature")
 
-			var queries []prQuery
-			f.findMergedPR = func(base, head Remote, headBranch, sha string) (int, error) {
-				queries = append(queries, prQuery{base.Name, head.Name, headBranch, sha})
-				if headBranch == "feature" && sha == tip {
-					return 123, nil
-				}
-				return 0, nil
-			}
+			var calls []prLookup
+			// An older merged pull request from the same branch name does
+			// not match the tip and must be skipped.
+			f.findMergedPRs = stubMergedPRs(map[string][]mergedPR{
+				"feature": {{Number: 99, HeadRefOid: strings.Repeat("0", 40)}, {Number: 123, HeadRefOid: tip}},
+			}, &calls)
 			var args []string
 			if tt.dryRun {
 				args = append(args, "--dry-run")
@@ -503,15 +517,23 @@ func TestRunDeletesSquashMergedBranch(t *testing.T) {
 				t.Fatalf("run() error: %v", res.err)
 			}
 
-			want := prQuery{base: "origin", head: "origin", headBranch: "feature", tip: tip}
-			if len(queries) != 1 || queries[0] != want {
-				t.Errorf("findMergedPR calls = %+v, want one call %+v", queries, want)
+			want := prLookup{remote: "origin", base: "main", heads: []string{"feature"}}
+			if len(calls) != 1 || !reflect.DeepEqual(calls[0], want) {
+				t.Errorf("findMergedPRs calls = %+v, want one call %+v", calls, want)
 			}
 			verb := "Deleted"
 			if tt.dryRun {
 				verb = "Would delete"
 			}
-			assertContains(t, "stdout", res.stdout, fmt.Sprintf("%s branch %s (was %s, merged via #123).", verb, tt.local, tip[:7]))
+			deleted := fmt.Sprintf("%s branch %s (was %s, merged via #123).", verb, tt.local, tip[:7])
+			switch {
+			case tt.dryRun:
+				assertContains(t, "stdout", res.stdout, "Would switch to branch main.\n"+deleted)
+			case tt.checkedOut:
+				assertContains(t, "stdout", res.stdout, "Switched to branch main.\n"+deleted)
+			default:
+				assertContains(t, "stdout", res.stdout, deleted)
+			}
 			assertNotContains(t, "stderr", res.stderr, "appears not merged")
 
 			if tt.dryRun {
@@ -533,6 +555,47 @@ func TestRunDeletesSquashMergedBranch(t *testing.T) {
 	}
 }
 
+// TestRunLooksUpSquashMergedBranchesTogether checks that all candidate
+// branches are looked up in a single call, with each remote branch name once,
+// and that only branches whose tip matches are deleted.
+func TestRunLooksUpSquashMergedBranchesTogether(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushUpstreamBranch("feature-a", "a-1")
+	f.pushUpstreamBranch("feature-b", "b-1")
+	f.pushUpstreamBranch("feature-c", "c-1")
+	f.trackRemoteBranch("feature-a")
+	f.trackRemoteBranch("feature-b")
+	f.trackRemoteBranch("feature-c")
+	f.localGit("branch", "--quiet", "--track", "copy-of-a", "origin/feature-a")
+	tipA := f.sha(f.local, "feature-a")
+	tipB := f.sha(f.local, "feature-b")
+	for _, b := range []string{"feature-a", "feature-b", "feature-c"} {
+		f.squashMergeAndDelete(b)
+	}
+
+	var calls []prLookup
+	f.findMergedPRs = stubMergedPRs(map[string][]mergedPR{
+		"feature-a": {{Number: 1, HeadRefOid: tipA}},
+		"feature-b": {{Number: 2, HeadRefOid: tipB}},
+	}, &calls)
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+
+	want := prLookup{remote: "origin", base: "main", heads: []string{"feature-a", "feature-b", "feature-c"}}
+	if len(calls) != 1 || !reflect.DeepEqual(calls[0], want) {
+		t.Errorf("findMergedPRs calls = %+v, want one call %+v", calls, want)
+	}
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch copy-of-a (was %s, merged via #1).", tipA[:7]))
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature-a (was %s, merged via #1).", tipA[:7]))
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature-b (was %s, merged via #2).", tipB[:7]))
+	assertContains(t, "stderr", res.stderr, "warning: 'feature-c' was deleted on origin, but appears not merged into 'main'")
+	if !f.localBranchExists("feature-c") {
+		t.Error("feature-c without a merged pull request was deleted")
+	}
+}
+
 // TestRunKeepsSquashMergedBranchWithoutPR checks the fallback: when no merged
 // pull request matches the tip, or the lookup fails, the branch is kept with
 // the usual warning. The failure reason is shown only with --verbose.
@@ -540,13 +603,16 @@ func TestRunKeepsSquashMergedBranchWithoutPR(t *testing.T) {
 	lookupErr := errors.New("gh: not logged in")
 	tests := []struct {
 		name     string
+		prs      []mergedPR // merged pull requests for "feature"
 		err      error
 		verbose  bool
 		wantNote bool
 	}{
-		{"no matching pull request", nil, false, false},
-		{"lookup failed", lookupErr, false, false},
-		{"lookup failed, verbose", lookupErr, true, true},
+		{"no merged pull request", nil, nil, false, false},
+		// Commits were added after the pull request was merged.
+		{"head differs from tip", []mergedPR{{Number: 7, HeadRefOid: strings.Repeat("0", 40)}}, nil, false, false},
+		{"lookup failed", nil, lookupErr, false, false},
+		{"lookup failed, verbose", nil, lookupErr, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -555,8 +621,11 @@ func TestRunKeepsSquashMergedBranchWithoutPR(t *testing.T) {
 			f.trackRemoteBranch("feature")
 			tip := f.sha(f.local, "feature")
 			f.squashMergeAndDelete("feature")
-			f.findMergedPR = func(Remote, Remote, string, string) (int, error) {
-				return 0, tt.err
+			f.findMergedPRs = func(runConfig, Remote, string, []string) (map[string][]mergedPR, error) {
+				if tt.err != nil {
+					return nil, tt.err
+				}
+				return map[string][]mergedPR{"feature": tt.prs}, nil
 			}
 			var args []string
 			if tt.verbose {
@@ -569,9 +638,8 @@ func TestRunKeepsSquashMergedBranchWithoutPR(t *testing.T) {
 			}
 			assertContains(t, "stderr", res.stderr, "warning: 'feature' was deleted on origin, but appears not merged into 'main'")
 			assertNotContains(t, "stdout", res.stdout, "Deleted branch feature")
-			note := "note: couldn't look up a merged pull request for 'feature': gh: not logged in"
 			if tt.wantNote {
-				assertContains(t, "stderr", res.stderr, note)
+				assertContains(t, "stderr", res.stderr, "note: couldn't look up merged pull requests: gh: not logged in")
 			} else {
 				assertNotContains(t, "stderr", res.stderr, "note: couldn't look up")
 			}
@@ -582,33 +650,69 @@ func TestRunKeepsSquashMergedBranchWithoutPR(t *testing.T) {
 	}
 }
 
+func TestBuildMergedPRQuery(t *testing.T) {
+	// Characters that would break or alter the query if interpolated.
+	heads := []string{"feature", `evil") { x } #`}
+	query, vars := buildMergedPRQuery(gitHubRepo{host: "github.com", owner: "him0", name: "gh-sync"}, "main", heads)
+
+	wantVars := []queryVar{
+		{"owner", "him0"}, {"name", "gh-sync"}, {"base", "main"},
+		{"h0", "feature"}, {"h1", `evil") { x } #`},
+	}
+	if !reflect.DeepEqual(vars, wantVars) {
+		t.Errorf("vars = %+v, want %+v", vars, wantVars)
+	}
+	for _, want := range []string{
+		"query($owner: String!, $name: String!, $base: String!, $h0: String!, $h1: String!) {",
+		"repository(owner: $owner, name: $name) {",
+		"b0: pullRequests(headRefName: $h0, baseRefName: $base, states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {",
+		"b1: pullRequests(headRefName: $h1, baseRefName: $base, states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {",
+		"nodes { number headRefOid }",
+	} {
+		assertContains(t, "query", query, want)
+	}
+	for _, leaked := range []string{"him0", "gh-sync", "evil", "feature"} {
+		assertNotContains(t, "query", query, leaked)
+	}
+}
+
+func TestParseMergedPRResponse(t *testing.T) {
+	heads := []string{"feature", "fix"}
+	got, err := parseMergedPRResponse([]byte(`{"data":{"repository":{
+		"b0":{"nodes":[{"number":12,"headRefOid":"aaaa"},{"number":3,"headRefOid":"bbbb"}]},
+		"b1":{"nodes":[]}}}}`), heads)
+	if err != nil {
+		t.Fatalf("parseMergedPRResponse() error: %v", err)
+	}
+	want := map[string][]mergedPR{
+		"feature": {{Number: 12, HeadRefOid: "aaaa"}, {Number: 3, HeadRefOid: "bbbb"}},
+		"fix":     {},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseMergedPRResponse() = %+v, want %+v", got, want)
+	}
+
+	for name, output := range map[string]string{
+		"repository not found": `{"data":{"repository":null}}`,
+		"missing alias":        `{"data":{"repository":{"b0":{"nodes":[]}}}}`,
+		"GraphQL error":        `{"data":null,"errors":[{"message":"Something went wrong"}]}`,
+		"not JSON":             `oops`,
+	} {
+		if _, err := parseMergedPRResponse([]byte(output), heads); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+}
+
 func TestMatchMergedPR(t *testing.T) {
-	output := []byte("12 aaaa\n34 bbbb\n")
-	tests := []struct {
-		name   string
-		output []byte
-		tip    string
-		want   int
-	}{
-		{"matching head", output, "bbbb", 34},
-		// A merged pull request whose head differs (commits were added
-		// after the merge) must not count.
-		{"no matching head", output, "cccc", 0},
-		{"no merged pull requests", nil, "bbbb", 0},
+	prs := []mergedPR{{Number: 12, HeadRefOid: "aaaa"}, {Number: 34, HeadRefOid: "bbbb"}}
+	if got := matchMergedPR(prs, "bbbb"); got != 34 {
+		t.Errorf("matchMergedPR(matching head) = %d, want 34", got)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := matchMergedPR(tt.output, tt.tip)
-			if err != nil {
-				t.Fatalf("matchMergedPR() error: %v", err)
-			}
-			if got != tt.want {
-				t.Errorf("matchMergedPR() = %d, want %d", got, tt.want)
-			}
-		})
-	}
-	if _, err := matchMergedPR([]byte("x bbbb\n"), "bbbb"); err == nil {
-		t.Error("matchMergedPR() with a non-numeric number: want error")
+	// A merged pull request whose head differs (commits were added after
+	// the merge) must not count.
+	if got := matchMergedPR(prs, "cccc"); got != 0 {
+		t.Errorf("matchMergedPR(no matching head) = %d, want 0", got)
 	}
 }
 
