@@ -68,7 +68,7 @@ gh-sync only ever moves branches forward or removes ones that are fully merged:
 - A branch is deleted only when it tracked a branch on the main remote, that branch is gone, and either the local branch has no commits missing from the remote default branch or the head commit of a pull request merged into the default branch is exactly the local branch tip. Branches that never had an upstream are never deleted.
 - These branches are looked up together after the other branches are processed, with one `gh api graphql` request per 50 branches against the main remote's repository, so their messages come last. When the lookup can't be done (`gh` not authenticated, a remote that is not on GitHub, an API error, no answer within 30 seconds), the branches are kept with the "appears not merged" warning; `--verbose` shows why. A branch with commits added after its pull request was merged is also kept.
 - If the branch being deleted is checked out, gh-sync switches to the default branch first and reports it as `Switched to branch ...`.
-- A branch checked out in another worktree is not moved.
+- A branch checked out in another worktree is neither updated nor deleted. It is skipped with `warning: '<name>' is checked out in another worktree (<path>); not updated` (or `not deleted`), also with `--dry-run`, and does not make the exit status 1.
 
 Worth knowing:
 
@@ -117,7 +117,10 @@ git remote set-head <remote> --auto
 ```
 
 **`warning: couldn't fast-forward '<name>'`**
-The branch is checked out and local changes would be overwritten, or it is checked out in another worktree. Commit or stash the changes and run `gh sync` again.
+The branch is checked out and local changes would be overwritten. Commit or stash the changes and run `gh sync` again.
+
+**`warning: '<name>' is checked out in another worktree (<path>); not updated`** (or `not deleted`)
+git can't move or delete a branch that another worktree has checked out. Run `git merge --ff-only` in that worktree, or switch it to another branch, or remove it with `git worktree remove <path>`.
 
 **`warning: '<name>' upstream config is broken; skipping`**
 `branch.<name>.merge` is missing or invalid. Repair it with:
@@ -134,7 +137,7 @@ When reporting a bug, please include the output of `gh sync --version` and `gh s
 ## Requirements
 
 - [GitHub CLI](https://cli.github.com/) 2.0 or later
-- Git
+- Git 2.23 or later
 
 ## Development
 

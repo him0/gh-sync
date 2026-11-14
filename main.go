@@ -236,7 +236,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 				printWarning(cfg.stderrColors, "'%s' was deleted on %s, but appears not merged into '%s'", c.branch, remote.Name, defaultBranch)
 				continue
 			}
-			if derr := deleteBranch(cfg, c.branch, c.tip, fmt.Sprintf(", merged via #%d", pr), &currentBranch, defaultBranch); derr != nil {
+			if derr := deleteBranch(cfg, c.branch, c.tip, c.worktreePath, fmt.Sprintf(", merged via #%d", pr), &currentBranch, defaultBranch); derr != nil {
 				hadFailure = true
 			}
 		}
@@ -464,6 +464,10 @@ type localBranch struct {
 	// ahead and behind count the commits only in the branch and only in
 	// upstream. Both are 0 when upstream is "" or gone.
 	ahead, behind int
+	// worktreePath is the worktree the branch is checked out in, or "" when
+	// it is not checked out. For the current worktree's branch it is the
+	// current worktree.
+	worktreePath string
 }
 
 // refSnapshot is the state of the local branches and the main remote's
@@ -475,8 +479,9 @@ type refSnapshot struct {
 }
 
 // refFormat is the for-each-ref format readRefs parses: NUL-separated fields,
-// one ref per line. Ref names cannot contain NUL or newline.
-const refFormat = "%(refname)%00%(objectname)%00%(upstream)%00%(upstream:track)"
+// one ref per line. Ref names cannot contain NUL or newline. %(worktreepath)
+// needs git 2.23 or later.
+const refFormat = "%(refname)%00%(objectname)%00%(upstream)%00%(upstream:track)%00%(worktreepath)"
 
 // readRefs reads every local branch with its tip, upstream and ahead/behind
 // counts, and the remote-tracking refs of remote, with a single for-each-ref,
@@ -511,7 +516,7 @@ func parseRefs(output, remote string) (refSnapshot, error) {
 			continue
 		}
 		fields := strings.Split(line, "\x00")
-		if len(fields) != 4 {
+		if len(fields) != 5 {
 			return refSnapshot{}, fmt.Errorf("unexpected for-each-ref output: %q", line)
 		}
 		refname := fields[0]
@@ -523,7 +528,7 @@ func parseRefs(output, remote string) (refSnapshot, error) {
 		if !ok || name == "" {
 			continue
 		}
-		b := localBranch{name: name, tip: fields[1], upstream: fields[2]}
+		b := localBranch{name: name, tip: fields[1], upstream: fields[2], worktreePath: fields[4]}
 		if b.upstream != "" {
 			var err error
 			b.ahead, b.behind, b.gone, err = parseTrack(fields[3])
@@ -632,6 +637,11 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 			return nil
 		case ahead == 0 && behind > 0:
 			oldCommit := b.tip
+			if inOtherWorktree(b, *currentBranch) {
+				// git refuses to move it; say why instead of failing.
+				printWarning(cfg.stderrColors, "'%s' is checked out in another worktree (%s); not updated", branch, b.worktreePath)
+				return nil
+			}
 			if cfg.dryRun {
 				fmt.Printf("%sWould update branch %s%s%s (was %s).\n", cfg.stdoutColors.green, cfg.stdoutColors.lightGreen, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
 				return nil
@@ -668,16 +678,28 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 	if ahead != 0 {
 		// The commits are not in the default branch, which is also the case
 		// after a squash or rebase merge.
-		*candidates = append(*candidates, squashCandidate{branch: branch, tip: b.tip})
+		*candidates = append(*candidates, squashCandidate{branch: branch, tip: b.tip, worktreePath: b.worktreePath})
 		return nil
 	}
-	return deleteBranch(cfg, branch, b.tip, "", currentBranch, defaultBranch)
+	return deleteBranch(cfg, branch, b.tip, b.worktreePath, "", currentBranch, defaultBranch)
+}
+
+// inOtherWorktree reports whether b is checked out in a worktree other than
+// the current one, whose checked-out branch is currentBranch.
+func inOtherWorktree(b localBranch, currentBranch string) bool {
+	return b.worktreePath != "" && b.name != currentBranch
 }
 
 // deleteBranch deletes branch, checking out defaultBranch first when branch
 // is checked out. reason is appended to the "(was <sha>" part of the message.
-// With --dry-run it only reports what it would do.
-func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch *string, defaultBranch string) error {
+// A branch checked out in another worktree (worktreePath) is kept with a
+// warning, since git refuses to delete it. With --dry-run it only reports
+// what it would do.
+func deleteBranch(cfg runConfig, branch, oldCommit, worktreePath, reason string, currentBranch *string, defaultBranch string) error {
+	if inOtherWorktree(localBranch{name: branch, worktreePath: worktreePath}, *currentBranch) {
+		printWarning(cfg.stderrColors, "'%s' is checked out in another worktree (%s); not deleted", branch, worktreePath)
+		return nil
+	}
 	if branch == *currentBranch {
 		if cfg.dryRun {
 			fmt.Printf("Would switch to branch %s.\n", defaultBranch)
@@ -708,8 +730,9 @@ func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch
 // branch. It is deleted only if a pull request merged into the default branch
 // has its tip as head commit.
 type squashCandidate struct {
-	branch string
-	tip    string
+	branch       string
+	tip          string
+	worktreePath string
 }
 
 // mergedPRChunkSize caps how many branch names one GraphQL request looks up.
