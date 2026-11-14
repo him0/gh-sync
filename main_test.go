@@ -162,14 +162,21 @@ func (f *syncFixture) pushUpstreamBranch(branch string, commits ...string) {
 	f.upstreamGit("checkout", "--quiet", "main")
 }
 
-// advanceUpstream checks out branch on upstream, adds commits, and pushes.
+// advanceUpstream checks out branch on upstream, adds commits, and pushes it
+// to the remote.
 func (f *syncFixture) advanceUpstream(branch string, commits ...string) {
+	f.t.Helper()
+	f.advanceOn("origin", branch, commits...)
+}
+
+// advanceOn is advanceUpstream for another remote of upstream, such as "fork".
+func (f *syncFixture) advanceOn(remote, branch string, commits ...string) {
 	f.t.Helper()
 	f.upstreamGit("checkout", "--quiet", branch)
 	for _, msg := range commits {
 		f.commit(f.upstream, msg)
 	}
-	f.upstreamGit("push", "--quiet", "origin", branch)
+	f.upstreamGit("push", "--quiet", remote, branch)
 	f.upstreamGit("checkout", "--quiet", "main")
 }
 
@@ -206,6 +213,65 @@ func (f *syncFixture) localBranchExists(branch string) bool {
 func (f *syncFixture) currentBranch() string {
 	f.t.Helper()
 	return f.localGit("symbolic-ref", "--short", "HEAD")
+}
+
+// assertBranchAt fails the test unless local branch exists and points at want.
+func (f *syncFixture) assertBranchAt(branch, want string) {
+	f.t.Helper()
+	if !f.localBranchExists(branch) {
+		f.t.Errorf("local branch %s was deleted", branch)
+		return
+	}
+	if got := f.sha(f.local, branch); got != want {
+		f.t.Errorf("local %s = %s, want unchanged %s", branch, got, want)
+	}
+}
+
+// mergeIntoUpstreamMain fast-forwards main to branch on upstream and pushes
+// it, as merging a pull request does.
+func (f *syncFixture) mergeIntoUpstreamMain(branch string) {
+	f.t.Helper()
+	f.upstreamGit("merge", "--quiet", "--ff-only", branch)
+	f.upstreamGit("push", "--quiet", "origin", "main")
+}
+
+// squashMergeAndDelete simulates GitHub's "Squash and merge" followed by
+// deleting the branch: a new commit lands on main, so the branch's own commits
+// never become reachable from the default branch.
+func (f *syncFixture) squashMergeAndDelete(branch string) {
+	f.t.Helper()
+	f.upstreamGit("checkout", "--quiet", "main")
+	f.commit(f.upstream, branch+" (squashed)")
+	f.upstreamGit("push", "--quiet", "origin", "main")
+	f.deleteRemoteBranch(branch)
+}
+
+// addForkRemote adds a second remote "fork" to local (and upstream, which
+// pushes to it), as in a fork setup where the main remote is the parent
+// repository. gh-sync keeps using origin as the main remote. The fork starts
+// as a copy of the remote.
+func (f *syncFixture) addForkRemote() string {
+	f.t.Helper()
+	fork := filepath.Join(f.t.TempDir(), "fork.git")
+	f.gitIn(f.upstream, "clone", "--quiet", "--bare", f.remote, fork)
+	f.upstreamGit("remote", "add", "fork", fork)
+	f.localGit("remote", "add", "fork", fork)
+	return fork
+}
+
+// pushForkBranch creates branch on upstream from main with the given
+// commits, pushes it to the fork only, and creates a local branch tracking
+// fork/<branch>.
+func (f *syncFixture) pushForkBranch(branch string, commits ...string) {
+	f.t.Helper()
+	f.upstreamGit("checkout", "--quiet", "-b", branch, "main")
+	for _, msg := range commits {
+		f.commit(f.upstream, msg)
+	}
+	f.upstreamGit("push", "--quiet", "fork", branch)
+	f.upstreamGit("checkout", "--quiet", "main")
+	f.localGit("fetch", "--quiet", "fork")
+	f.localGit("branch", "--quiet", "--track", branch, "fork/"+branch)
 }
 
 // syncResult captures what a single run() invocation printed and returned.
@@ -313,62 +379,44 @@ func TestRunFastForwardsNonCurrentBranch(t *testing.T) {
 }
 
 // TestRunFastForwardsBranchSharingNameWithTag covers a local branch that has
-// the same name as a tag. `%(refname:short)` would list it as "heads/rel",
-// which made gh-sync skip it silently (#57).
+// the same name as a tag (#57). `%(refname:short)` would list it as
+// "heads/rel" and skip it; when it is checked out, `symbolic-ref --short HEAD`
+// would also print "heads/rel", so `branch -f` would be used on the
+// checked-out branch, which git refuses.
 func TestRunFastForwardsBranchSharingNameWithTag(t *testing.T) {
-	f := newSyncFixture(t)
-	f.pushUpstreamBranch("rel", "rel-1")
-	f.trackRemoteBranch("rel")
-	f.localGit("tag", "rel", "rel")
-	before := f.sha(f.local, "refs/heads/rel")
-	f.advanceUpstream("rel", "rel-2")
+	for _, checkedOut := range []bool{false, true} {
+		t.Run(fmt.Sprintf("checkedOut=%v", checkedOut), func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushUpstreamBranch("rel", "rel-1")
+			f.trackRemoteBranch("rel")
+			f.localGit("tag", "rel", "rel")
+			if checkedOut {
+				f.localGit("switch", "--quiet", "rel")
+			}
+			before := f.sha(f.local, "refs/heads/rel")
+			f.advanceUpstream("rel", "rel-2")
 
-	res := f.sync()
-	if res.err != nil {
-		t.Fatalf("run() error: %v", res.err)
-	}
-	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch rel (was %s).", before[:7]))
-	if got, want := f.sha(f.local, "refs/heads/rel"), f.sha(f.upstream, "rel"); got != want {
-		t.Errorf("local rel = %s, want %s", got, want)
-	}
-	if got := f.sha(f.local, "refs/tags/rel"); got != before {
-		t.Errorf("tag rel moved to %s, want it left at %s", got, before)
+			res := f.sync()
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch rel (was %s).", before[:7]))
+			want := f.sha(f.upstream, "rel")
+			if got := f.sha(f.local, "refs/heads/rel"); got != want {
+				t.Errorf("local rel = %s, want %s", got, want)
+			}
+			if got := f.sha(f.local, "HEAD"); checkedOut && got != want {
+				t.Errorf("local HEAD = %s, want %s", got, want)
+			}
+			if got := f.sha(f.local, "refs/tags/rel"); got != before {
+				t.Errorf("tag rel moved to %s, want it left at %s", got, before)
+			}
+		})
 	}
 }
 
-// TestRunFastForwardsCheckedOutBranchSharingNameWithTag is the checked-out
-// variant: `symbolic-ref --short HEAD` would also print "heads/rel", so the
-// current branch would not match the listed name and `branch -f` would be
-// used on the checked-out branch, which git refuses.
-func TestRunFastForwardsCheckedOutBranchSharingNameWithTag(t *testing.T) {
-	f := newSyncFixture(t)
-	f.pushUpstreamBranch("rel", "rel-1")
-	f.trackRemoteBranch("rel")
-	f.localGit("tag", "rel", "rel")
-	f.localGit("switch", "--quiet", "rel")
-	before := f.sha(f.local, "refs/heads/rel")
-	f.advanceUpstream("rel", "rel-2")
-
-	res := f.sync()
-	if res.err != nil {
-		t.Fatalf("run() error: %v", res.err)
-	}
-	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch rel (was %s).", before[:7]))
-	want := f.sha(f.upstream, "rel")
-	if got := f.sha(f.local, "refs/heads/rel"); got != want {
-		t.Errorf("local rel = %s, want %s", got, want)
-	}
-	// Updated via merge --ff-only, so HEAD follows the branch.
-	if got := f.sha(f.local, "HEAD"); got != want {
-		t.Errorf("local HEAD = %s, want %s", got, want)
-	}
-	if got := f.sha(f.local, "refs/tags/rel"); got != before {
-		t.Errorf("tag rel moved to %s, want it left at %s", got, before)
-	}
-}
-
-// TestGetLocalBranchesDetachedHead checks that the "(HEAD detached at ...)"
-// line printed by `git branch` is not returned as a branch name (#57).
+// TestReadRefsDetachedHead checks that a detached HEAD is not listed as a
+// branch, as `git branch` would with "(HEAD detached at ...)" (#57).
 func TestReadRefsDetachedHead(t *testing.T) {
 	f := newSyncFixture(t)
 	f.pushUpstreamBranch("feature", "feature-1")
@@ -486,8 +534,7 @@ func TestRunDeletesMergedGoneBranch(t *testing.T) {
 
 			// Merge feature into main upstream (fast-forward), then delete
 			// the remote branch as a merged PR would.
-			f.upstreamGit("merge", "--quiet", "--ff-only", "feature")
-			f.upstreamGit("push", "--quiet", "origin", "main")
+			f.mergeIntoUpstreamMain("feature")
 			f.deleteRemoteBranch("feature")
 
 			res := f.sync()
@@ -528,8 +575,7 @@ func TestRunDeletesCheckedOutBranchWithoutLocalDefault(t *testing.T) {
 	f.localGit("remote", "add", "mirror", f.remote)
 	f.localGit("fetch", "--quiet", "mirror")
 
-	f.upstreamGit("merge", "--quiet", "--ff-only", "feature")
-	f.upstreamGit("push", "--quiet", "origin", "main")
+	f.mergeIntoUpstreamMain("feature")
 	f.deleteRemoteBranch("feature")
 
 	res := f.sync()
@@ -546,38 +592,6 @@ func TestRunDeletesCheckedOutBranchWithoutLocalDefault(t *testing.T) {
 	if got := f.localGit("rev-parse", "--abbrev-ref", "main@{upstream}"); got != "origin/main" {
 		t.Errorf("main tracks %q, want origin/main", got)
 	}
-}
-
-func TestRunKeepsUnmergedGoneBranch(t *testing.T) {
-	f := newSyncFixture(t)
-	f.pushUpstreamBranch("feature", "feature-1")
-	f.trackRemoteBranch("feature")
-	featureSHA := f.sha(f.local, "feature")
-	f.deleteRemoteBranch("feature")
-
-	res := f.sync()
-	if res.err != nil {
-		t.Fatalf("run() error: %v", res.err)
-	}
-	assertContains(t, "stderr", res.stderr, "warning: 'feature' was deleted on origin, but appears not merged into 'main'")
-	assertNotContains(t, "stdout", res.stdout, "Deleted branch feature")
-	if !f.localBranchExists("feature") {
-		t.Fatal("unmerged branch feature was deleted")
-	}
-	if got := f.sha(f.local, "feature"); got != featureSHA {
-		t.Errorf("local feature = %s, want unchanged %s", got, featureSHA)
-	}
-}
-
-// squashMergeAndDelete simulates GitHub's "Squash and merge" followed by
-// deleting the branch: a new commit lands on main, so the branch's own commits
-// never become reachable from the default branch.
-func (f *syncFixture) squashMergeAndDelete(branch string) {
-	f.t.Helper()
-	f.upstreamGit("checkout", "--quiet", "main")
-	f.commit(f.upstream, branch+" (squashed)")
-	f.upstreamGit("push", "--quiet", "origin", "main")
-	f.deleteRemoteBranch(branch)
 }
 
 // prLookup records the arguments a mergedPRFinder was called with.
@@ -847,9 +861,9 @@ func TestSSHResolvedHost(t *testing.T) {
 	}
 }
 
-func TestResolveGitHubHostLeavesNonSSHRemotes(t *testing.T) {
-	// An empty PATH makes any ssh call fail, so a resolved host proves ssh
-	// was not needed.
+func TestResolveGitHubHostWithoutSSH(t *testing.T) {
+	// An empty PATH makes any ssh call fail: a non-SSH remote keeps its host,
+	// a cached host is reused, and a failed lookup keeps the URL's host.
 	t.Setenv("PATH", "")
 	cfg := runConfig{sshHosts: map[string]string{"github-work": "github.com"}}
 	tests := []struct {
@@ -922,9 +936,7 @@ func TestRunDryRun(t *testing.T) {
 	mergedBefore := f.sha(f.local, "merged")
 
 	f.advanceUpstream("feature", "feature-2")
-	f.upstreamGit("checkout", "--quiet", "main")
-	f.upstreamGit("merge", "--quiet", "--ff-only", "merged")
-	f.upstreamGit("push", "--quiet", "origin", "main")
+	f.mergeIntoUpstreamMain("merged")
 	f.deleteRemoteBranch("merged")
 
 	res := f.sync("--dry-run")
@@ -1010,12 +1022,18 @@ func TestRunColorsWarnings(t *testing.T) {
 	}
 }
 
+// TestRunUpToDateIsNoop checks that up-to-date branches, and a local-only
+// branch (no upstream, no same-named remote branch) that is fully merged, are
+// left alone silently: branches that never had an upstream are never deleted.
 func TestRunUpToDateIsNoop(t *testing.T) {
 	f := newSyncFixture(t)
 	f.pushUpstreamBranch("feature", "feature-1")
 	f.trackRemoteBranch("feature")
-	mainBefore := f.sha(f.local, "main")
-	featureBefore := f.sha(f.local, "feature")
+	f.localGit("branch", "--no-track", "local-only", "main")
+	before := make(map[string]string)
+	for _, b := range []string{"main", "feature", "local-only"} {
+		before[b] = f.sha(f.local, b)
+	}
 
 	res := f.sync()
 	if res.err != nil {
@@ -1027,11 +1045,8 @@ func TestRunUpToDateIsNoop(t *testing.T) {
 	if res.stderr != "" {
 		t.Errorf("stderr = %q, want empty", res.stderr)
 	}
-	if got := f.sha(f.local, "main"); got != mainBefore {
-		t.Errorf("local main = %s, want unchanged %s", got, mainBefore)
-	}
-	if got := f.sha(f.local, "feature"); got != featureBefore {
-		t.Errorf("local feature = %s, want unchanged %s", got, featureBefore)
+	for b, sha := range before {
+		f.assertBranchAt(b, sha)
 	}
 }
 
@@ -1059,8 +1074,7 @@ func TestRunRejectsPositionalArguments(t *testing.T) {
 
 			// Merging "merged" moves main forward, so a real sync would both
 			// fast-forward main and delete merged.
-			f.upstreamGit("merge", "--quiet", "--ff-only", "merged")
-			f.upstreamGit("push", "--quiet", "origin", "main")
+			f.mergeIntoUpstreamMain("merged")
 			f.deleteRemoteBranch("merged")
 
 			res := f.sync(tt.args...)
@@ -1087,24 +1101,18 @@ func TestRunRejectsPositionalArguments(t *testing.T) {
 
 func TestRunRemoteFlag(t *testing.T) {
 	f := newSyncFixture(t)
-	// A second remote "fork" (a copy of remote.git) where feature moves on.
-	// It ranks below origin, so only --remote=fork selects it.
-	fork := filepath.Join(t.TempDir(), "fork.git")
-	f.gitIn(f.upstream, "clone", "--quiet", "--bare", f.remote, fork)
-	f.upstreamGit("remote", "add", "fork", fork)
+	// feature moves on in fork, which ranks below origin, so only
+	// --remote=fork selects it.
+	f.addForkRemote()
 	f.pushUpstreamBranch("feature", "feature-1")
-	f.upstreamGit("push", "--quiet", "fork", "main", "feature")
-	f.localGit("remote", "add", "fork", fork)
+	f.upstreamGit("push", "--quiet", "fork", "feature")
 	f.localGit("fetch", "--quiet", "fork")
 	// Without upstream config, feature is matched by name against the main
 	// remote. (A branch tracking fork would be synced against fork/feature
 	// whichever remote is the main one.)
 	f.localGit("branch", "--quiet", "--no-track", "feature", "fork/feature")
 	before := f.sha(f.local, "feature")
-	f.upstreamGit("checkout", "--quiet", "feature")
-	f.commit(f.upstream, "feature-2")
-	f.upstreamGit("push", "--quiet", "fork", "feature")
-	f.upstreamGit("checkout", "--quiet", "main")
+	f.advanceOn("fork", "feature", "feature-2")
 
 	res := f.sync()
 	if res.err != nil {
@@ -1120,17 +1128,31 @@ func TestRunRemoteFlag(t *testing.T) {
 	f.assertBranchAt("feature", f.sha(f.upstream, "feature"))
 }
 
-func TestRunRemoteFlagUnknownRemote(t *testing.T) {
-	f := newSyncFixture(t)
-	before := f.sha(f.local, "main")
-	f.advanceUpstream("main", "upstream-1")
-
-	res := f.sync("--remote=nope")
-	if res.err == nil {
-		t.Fatal("run() succeeded, want an error for an unknown remote")
+// TestRunRejectsInvalidOptions checks that an invalid option value stops
+// gh-sync before anything is synced.
+func TestRunRejectsInvalidOptions(t *testing.T) {
+	tests := []struct {
+		arg     string
+		wantErr string
+	}{
+		{"--remote=nope", "fatal: no such remote 'nope'"},
+		{"--exclude=[", `fatal: invalid exclude pattern "["`},
+		{"--color=sometimes", `fatal: invalid --color value: "sometimes"`},
 	}
-	assertContains(t, "stderr", res.stderr, "fatal: no such remote 'nope'")
-	f.assertBranchAt("main", before)
+	for _, tt := range tests {
+		t.Run(tt.arg, func(t *testing.T) {
+			f := newSyncFixture(t)
+			before := f.sha(f.local, "main")
+			f.advanceUpstream("main", "upstream-1")
+
+			res := f.sync(tt.arg)
+			if res.err == nil {
+				t.Fatal("run() error = nil, want an error")
+			}
+			assertContains(t, "stderr", res.stderr, tt.wantErr)
+			f.assertBranchAt("main", before)
+		})
+	}
 }
 
 // TestRunExclude checks that branches matching an exclude pattern, from
@@ -1177,19 +1199,6 @@ func TestRunExclude(t *testing.T) {
 			assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch other (was %s).", otherBefore[:7]))
 		})
 	}
-}
-
-func TestRunExcludeInvalidPattern(t *testing.T) {
-	f := newSyncFixture(t)
-	before := f.sha(f.local, "main")
-	f.advanceUpstream("main", "upstream-1")
-
-	res := f.sync("--exclude=[")
-	if res.err == nil {
-		t.Fatal("run() succeeded, want an error for an invalid pattern")
-	}
-	assertContains(t, "stderr", res.stderr, `fatal: invalid exclude pattern "["`)
-	f.assertBranchAt("main", before)
 }
 
 func TestMatchExclude(t *testing.T) {
@@ -1297,8 +1306,7 @@ func TestRunIgnoresDanglingRemoteHead(t *testing.T) {
 	f.trackRemoteBranch("feature")
 	featureSHA := f.sha(f.local, "feature")
 
-	f.upstreamGit("merge", "--quiet", "--ff-only", "feature")
-	f.upstreamGit("push", "--quiet", "origin", "main")
+	f.mergeIntoUpstreamMain("feature")
 	f.deleteRemoteBranch("feature")
 	f.deleteRemoteBranch("master")
 
@@ -1313,19 +1321,13 @@ func TestRunIgnoresDanglingRemoteHead(t *testing.T) {
 	}
 }
 
-// makePromisorRemote marks origin in the local clone as a promisor remote, as
-// `git clone --filter=blob:none` does. `git remote -v` then prints the filter
-// after "(fetch)" (e.g. "origin\t<url> (fetch) [blob:none]").
-func (f *syncFixture) makePromisorRemote() {
-	f.t.Helper()
-	f.localGit("config", "remote.origin.promisor", "true")
-	f.localGit("config", "remote.origin.partialclonefilter", "blob:none")
-}
-
 // TestRunPartialClone checks that a sync completes in a partial clone (#56).
 func TestRunPartialClone(t *testing.T) {
 	f := newSyncFixture(t)
-	f.makePromisorRemote()
+	// Mark origin as a promisor remote, as `git clone --filter=blob:none`
+	// does: `git remote -v` then prints "origin\t<url> (fetch) [blob:none]".
+	f.localGit("config", "remote.origin.promisor", "true")
+	f.localGit("config", "remote.origin.partialclonefilter", "blob:none")
 	before := f.sha(f.local, "main")
 	f.advanceUpstream("main", "upstream-1")
 
@@ -1362,89 +1364,9 @@ func TestParseFetchRemoteLine(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Tests for issue #65: behavior promised by the README that was not pinned
-// down by a test.
-// ---------------------------------------------------------------------------
-
-// assertBranchAt fails the test unless local branch exists and points at want.
-func (f *syncFixture) assertBranchAt(branch, want string) {
-	f.t.Helper()
-	if !f.localBranchExists(branch) {
-		f.t.Errorf("local branch %s was deleted", branch)
-		return
-	}
-	if got := f.sha(f.local, branch); got != want {
-		f.t.Errorf("local %s = %s, want unchanged %s", branch, got, want)
-	}
-}
-
-// mergeIntoUpstreamMain fast-forwards main to branch on upstream and pushes
-// it, as merging a pull request does.
-func (f *syncFixture) mergeIntoUpstreamMain(branch string) {
-	f.t.Helper()
-	f.upstreamGit("merge", "--quiet", "--ff-only", branch)
-	f.upstreamGit("push", "--quiet", "origin", "main")
-}
-
-// TestRunIgnoresBranchWithoutRemoteCounterpart checks the Safety promise that
-// branches that never had an upstream are never deleted: a local-only branch
-// (no upstream config, no same-named branch on the main remote) is left
-// untouched and silent, even when it is fully merged into the default branch.
-func TestRunIgnoresBranchWithoutRemoteCounterpart(t *testing.T) {
-	f := newSyncFixture(t)
-	// local-only points at main, so every commit is in origin/main and the
-	// deletion path would consider it merged.
-	f.localGit("branch", "--no-track", "local-only", "main")
-	before := f.sha(f.local, "local-only")
-
-	res := f.sync()
-	if res.err != nil {
-		t.Fatalf("run() error: %v", res.err)
-	}
-	if res.stdout != "" {
-		t.Errorf("stdout = %q, want empty", res.stdout)
-	}
-	if res.stderr != "" {
-		t.Errorf("stderr = %q, want empty", res.stderr)
-	}
-	f.assertBranchAt("local-only", before)
-}
-
-// addForkRemote adds a second remote "fork" to local (and upstream, which
-// pushes to it), as in a fork setup where the main remote is the parent
-// repository. gh-sync keeps using origin as the main remote. The fork starts
-// as a copy of the remote.
-func (f *syncFixture) addForkRemote() string {
-	f.t.Helper()
-	fork := filepath.Join(f.t.TempDir(), "fork.git")
-	f.gitIn(f.upstream, "clone", "--quiet", "--bare", f.remote, fork)
-	f.upstreamGit("remote", "add", "fork", fork)
-	f.localGit("remote", "add", "fork", fork)
-	return fork
-}
-
-// pushForkBranch creates branch on upstream from main with the given
-// commits, pushes it to the fork only, and creates a local branch tracking
-// fork/<branch>.
-func (f *syncFixture) pushForkBranch(branch string, commits ...string) {
-	f.t.Helper()
-	f.upstreamGit("checkout", "--quiet", "-b", branch, "main")
-	for _, msg := range commits {
-		f.commit(f.upstream, msg)
-	}
-	f.upstreamGit("push", "--quiet", "fork", branch)
-	f.upstreamGit("checkout", "--quiet", "main")
-	f.localGit("fetch", "--quiet", "fork")
-	f.localGit("branch", "--quiet", "--track", branch, "fork/"+branch)
-}
-
 // TestRunSyncsBranchTrackingOtherRemote checks that a branch tracking a
 // remote other than the main remote (a fork's origin when the main remote is
-// upstream) is synced against its own upstream: the other remote is fetched,
-// the branch is fast-forwarded when its upstream moved, and it is deleted
-// when its upstream was deleted and it is merged into the main remote's
-// default branch.
+// upstream) is synced against its own upstream.
 func TestRunSyncsBranchTrackingOtherRemote(t *testing.T) {
 	t.Run("fast-forward", func(t *testing.T) {
 		f := newSyncFixture(t)
@@ -1452,10 +1374,7 @@ func TestRunSyncsBranchTrackingOtherRemote(t *testing.T) {
 		f.pushForkBranch("topic", "topic-1")
 		before := f.sha(f.local, "topic")
 		// The fork's topic moves on; local has not fetched it yet.
-		f.upstreamGit("checkout", "--quiet", "topic")
-		f.commit(f.upstream, "topic-2")
-		f.upstreamGit("push", "--quiet", "fork", "topic")
-		f.upstreamGit("checkout", "--quiet", "main")
+		f.advanceOn("fork", "topic", "topic-2")
 
 		res := f.sync()
 		if res.err != nil {
@@ -1611,50 +1530,41 @@ func TestRunFastForwardsByNameWithoutUpstreamConfig(t *testing.T) {
 	}
 }
 
-// TestRunDeleteFailures checks that when deleting a merged, gone branch
-// fails, a warning is printed, run() returns an error and the branch is kept.
-func TestRunDeleteFailures(t *testing.T) {
-	// setup creates a merged, gone branch "feature" whose commit adds file f.
-	setup := func(t *testing.T) (*syncFixture, string) {
-		f := newSyncFixture(t)
-		f.upstreamGit("checkout", "--quiet", "-b", "feature")
-		if err := os.WriteFile(filepath.Join(f.upstream, "f"), []byte("feature\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		f.upstreamGit("add", "f")
-		f.commit(f.upstream, "add f")
-		f.upstreamGit("push", "--quiet", "-u", "origin", "feature")
-		f.upstreamGit("checkout", "--quiet", "main")
-		f.trackRemoteBranch("feature")
-		f.mergeIntoUpstreamMain("feature")
-		f.deleteRemoteBranch("feature")
-		return f, f.sha(f.local, "feature")
+// TestRunKeepsBranchWhenCheckoutFails checks that a checked-out merged, gone
+// branch is kept, with a warning and an error exit, when switching to the
+// default branch first fails: here a local change to f, which local main
+// does not have yet, blocks the checkout.
+func TestRunKeepsBranchWhenCheckoutFails(t *testing.T) {
+	f := newSyncFixture(t)
+	f.upstreamGit("checkout", "--quiet", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(f.upstream, "f"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.upstreamGit("add", "f")
+	f.commit(f.upstream, "add f")
+	f.upstreamGit("push", "--quiet", "-u", "origin", "feature")
+	f.upstreamGit("checkout", "--quiet", "main")
+	f.trackRemoteBranch("feature")
+	f.mergeIntoUpstreamMain("feature")
+	f.deleteRemoteBranch("feature")
+	before := f.sha(f.local, "feature")
+	f.localGit("checkout", "--quiet", "feature")
+	if err := os.WriteFile(filepath.Join(f.local, "f"), []byte("local change\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	// The checked-out branch is deleted only after switching to the default
-	// branch. A local change to f (which local main does not have yet) makes
-	// that checkout fail, so the branch must not be deleted.
-	t.Run("checkout fails", func(t *testing.T) {
-		f, before := setup(t)
-		f.localGit("checkout", "--quiet", "feature")
-		if err := os.WriteFile(filepath.Join(f.local, "f"), []byte("local change\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		res := f.sync()
-		if res.err == nil {
-			t.Fatal("run() error = nil, want an error")
-		}
-		assertContains(t, "stderr", res.stderr, "warning: couldn't checkout 'main':")
-		assertContains(t, "stderr", res.stderr, "would be overwritten by checkout")
-		assertNotContains(t, "stdout", res.stdout, "Switched to branch")
-		assertNotContains(t, "stdout", res.stdout, "Deleted branch feature")
-		f.assertBranchAt("feature", before)
-		if f.currentBranch() != "feature" {
-			t.Errorf("current branch = %q, want feature", f.currentBranch())
-		}
-	})
-
+	res := f.sync()
+	if res.err == nil {
+		t.Fatal("run() error = nil, want an error")
+	}
+	assertContains(t, "stderr", res.stderr, "warning: couldn't checkout 'main':")
+	assertContains(t, "stderr", res.stderr, "would be overwritten by checkout")
+	assertNotContains(t, "stdout", res.stdout, "Switched to branch")
+	assertNotContains(t, "stdout", res.stdout, "Deleted branch feature")
+	f.assertBranchAt("feature", before)
+	if f.currentBranch() != "feature" {
+		t.Errorf("current branch = %q, want feature", f.currentBranch())
+	}
 }
 
 // TestRunSkipsBranchesInOtherWorktree checks that a behind branch, a merged
