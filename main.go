@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -116,12 +117,14 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		dryRun      bool
 		colorFlag   string
 		remoteFlag  string
+		excludeFlag stringList
 		showVersion bool
 	)
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
 	fs.BoolVar(&dryRun, "dry-run", false, "show what would be updated or deleted without changing branches")
 	fs.StringVar(&colorFlag, "color", "auto", "colorize output (always, never, auto)")
 	fs.StringVar(&remoteFlag, "remote", "", "sync against this remote instead of the automatically chosen one")
+	fs.Var(&excludeFlag, "exclude", "skip local branches matching this glob (repeatable)")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	// fs.Parse calls fs.Usage both for --help and for parse errors, so it
 	// cannot tell which stream to use. Print the usage after Parse instead:
@@ -169,6 +172,12 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 
 	if err := checkGitRepo(); err != nil {
 		printError(cfg.stderrColors, "fatal: Not a git repository")
+		return err
+	}
+
+	excludes, err := getExcludePatterns(excludeFlag)
+	if err != nil {
+		printError(cfg.stderrColors, "fatal: %s", err.Error())
 		return err
 	}
 
@@ -223,6 +232,12 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 	hadFailure := false
 	var candidates []squashCandidate
 	for _, branch := range branches {
+		if pattern, ok := matchExclude(excludes, branch); ok {
+			if cfg.verbose {
+				fmt.Fprintf(os.Stderr, "note: skipping '%s' (excluded by '%s')\n", branch, pattern)
+			}
+			continue
+		}
 		if perr := processBranch(cfg, branch, remote, branchToRemote, &currentBranch, defaultBranch, fullDefaultBranch, &candidates); perr != nil {
 			hadFailure = true
 		}
@@ -262,6 +277,8 @@ Options:
         colorize output (always, never, auto) (default "auto")
   --remote name
         sync against this remote instead of the automatically chosen one
+  --exclude glob
+        skip local branches matching this glob (repeatable)
   --version
         print version and exit
 `
@@ -270,6 +287,65 @@ func printUsage(w io.Writer) {
 	// Like the other writes to stdout/stderr, a failed write has nowhere
 	// better to be reported.
 	_, _ = fmt.Fprint(w, usageText)
+}
+
+// stringList is a flag.Value that collects every occurrence of a repeatable
+// flag.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(v string) error {
+	*l = append(*l, v)
+	return nil
+}
+
+// getExcludePatterns returns the branch exclude patterns: every
+// gh-sync.exclude value from git config followed by the --exclude flags.
+// Both sources add to the set; neither replaces the other. A pattern that
+// path.Match cannot parse is an error, so a typo doesn't silently match
+// nothing.
+func getExcludePatterns(flags []string) ([]string, error) {
+	var patterns []string
+	cmd := exec.Command("git", "config", "--get-all", "gh-sync.exclude")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		// Exit code 1 means the key is not set.
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			if msg := strings.TrimSpace(stderr.String()); msg != "" {
+				return nil, fmt.Errorf("couldn't read gh-sync.exclude: %w: %s", err, msg)
+			}
+			return nil, fmt.Errorf("couldn't read gh-sync.exclude: %w", err)
+		}
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			patterns = append(patterns, p)
+		}
+	}
+	patterns = append(patterns, flags...)
+	for _, p := range patterns {
+		if _, err := path.Match(p, ""); err != nil {
+			return nil, fmt.Errorf("invalid exclude pattern %q: %w", p, err)
+		}
+	}
+	return patterns, nil
+}
+
+// matchExclude returns the first pattern in patterns that matches branch.
+// Patterns use path.Match syntax, so "*" does not cross a "/": "wip/*"
+// matches "wip/foo" but not "wip/foo/bar".
+func matchExclude(patterns []string, branch string) (string, bool) {
+	for _, p := range patterns {
+		// Patterns were validated by getExcludePatterns.
+		if ok, _ := path.Match(p, branch); ok {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // isTerminal reports whether fd is a terminal, including the MSYS2 / Cygwin

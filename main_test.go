@@ -952,8 +952,6 @@ func TestRunRejectsPositionalArguments(t *testing.T) {
 	}
 }
 
-// TestRunHelp checks that --help prints the usage to stdout, so
-// `gh sync --help | less` works, and does not sync (issue #63).
 func TestRunRemoteFlag(t *testing.T) {
 	f := newSyncFixture(t)
 	// A second remote "fork" (a copy of remote.git) where feature moves on.
@@ -999,6 +997,87 @@ func TestRunRemoteFlagUnknownRemote(t *testing.T) {
 	f.assertBranchAt("main", before)
 }
 
+// TestRunExclude checks that branches matching an exclude pattern, from
+// --exclude or gh-sync.exclude, are neither updated nor deleted, while other
+// branches still are.
+func TestRunExclude(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config []string
+		flags  []string
+	}{
+		{name: "flag", flags: []string{"--exclude=wip/*", "--exclude=keep"}},
+		{name: "config", config: []string{"wip/*", "keep"}},
+		{name: "config and flag", config: []string{"wip/*"}, flags: []string{"--exclude=keep"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			// wip/a would be fast-forwarded, keep would be deleted (merged
+			// and gone), and other would be fast-forwarded.
+			for _, b := range []string{"wip/a", "keep", "other"} {
+				f.pushUpstreamBranch(b, b+"-1")
+				f.trackRemoteBranch(b)
+			}
+			wipBefore := f.sha(f.local, "wip/a")
+			keepBefore := f.sha(f.local, "keep")
+			otherBefore := f.sha(f.local, "other")
+			f.advanceUpstream("wip/a", "wip-2")
+			f.advanceUpstream("other", "other-2")
+			f.upstreamGit("merge", "--quiet", "--no-edit", "keep")
+			f.upstreamGit("push", "--quiet", "origin", "main")
+			f.deleteRemoteBranch("keep")
+			for _, p := range tc.config {
+				f.localGit("config", "--add", "gh-sync.exclude", p)
+			}
+
+			res := f.sync(append([]string{"--verbose"}, tc.flags...)...)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			f.assertBranchAt("wip/a", wipBefore)
+			f.assertBranchAt("keep", keepBefore)
+			assertContains(t, "stderr", res.stderr, "note: skipping 'wip/a' (excluded by 'wip/*')")
+			assertContains(t, "stderr", res.stderr, "note: skipping 'keep' (excluded by 'keep')")
+			assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch other (was %s).", otherBefore[:7]))
+		})
+	}
+}
+
+func TestRunExcludeInvalidPattern(t *testing.T) {
+	f := newSyncFixture(t)
+	before := f.sha(f.local, "main")
+	f.advanceUpstream("main", "upstream-1")
+
+	res := f.sync("--exclude=[")
+	if res.err == nil {
+		t.Fatal("run() succeeded, want an error for an invalid pattern")
+	}
+	assertContains(t, "stderr", res.stderr, `fatal: invalid exclude pattern "["`)
+	f.assertBranchAt("main", before)
+}
+
+func TestMatchExclude(t *testing.T) {
+	patterns := []string{"wip/*", "tmp-?"}
+	for _, tc := range []struct {
+		branch string
+		want   string
+	}{
+		{"wip/foo", "wip/*"},
+		{"wip/foo/bar", ""},
+		{"wip", ""},
+		{"tmp-1", "tmp-?"},
+		{"tmp-12", ""},
+		{"main", ""},
+	} {
+		got, ok := matchExclude(patterns, tc.branch)
+		if got != tc.want || ok != (tc.want != "") {
+			t.Errorf("matchExclude(%q) = %q, %v; want %q", tc.branch, got, ok, tc.want)
+		}
+	}
+}
+
+// TestRunHelp checks that --help prints the usage to stdout, so
+// `gh sync --help | less` works, and does not sync (issue #63).
 func TestRunHelp(t *testing.T) {
 	f := newSyncFixture(t)
 	before := f.sha(f.local, "main")
