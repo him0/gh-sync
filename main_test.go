@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -542,6 +543,79 @@ func TestRunFastForwardsNonCurrentBranch(t *testing.T) {
 	}
 	if f.currentBranch() != "main" {
 		t.Errorf("current branch = %q, want main", f.currentBranch())
+	}
+}
+
+// TestRunFastForwardsBranchSharingNameWithTag covers a local branch that has
+// the same name as a tag. `%(refname:short)` would list it as "heads/rel",
+// which made gh-sync skip it silently (#57).
+func TestRunFastForwardsBranchSharingNameWithTag(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushUpstreamBranch("rel", "rel-1")
+	f.trackRemoteBranch("rel")
+	f.localGit("tag", "rel", "rel")
+	before := f.sha(f.local, "refs/heads/rel")
+	f.advanceUpstream("rel", "rel-2")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch rel (was %s).", before[:7]))
+	if got, want := f.sha(f.local, "refs/heads/rel"), f.sha(f.upstream, "rel"); got != want {
+		t.Errorf("local rel = %s, want %s", got, want)
+	}
+	if got := f.sha(f.local, "refs/tags/rel"); got != before {
+		t.Errorf("tag rel moved to %s, want it left at %s", got, before)
+	}
+}
+
+// TestRunFastForwardsCheckedOutBranchSharingNameWithTag is the checked-out
+// variant: `symbolic-ref --short HEAD` would also print "heads/rel", so the
+// current branch would not match the listed name and `branch -f` would be
+// used on the checked-out branch, which git refuses.
+func TestRunFastForwardsCheckedOutBranchSharingNameWithTag(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushUpstreamBranch("rel", "rel-1")
+	f.trackRemoteBranch("rel")
+	f.localGit("tag", "rel", "rel")
+	f.localGit("switch", "--quiet", "rel")
+	before := f.sha(f.local, "refs/heads/rel")
+	f.advanceUpstream("rel", "rel-2")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch rel (was %s).", before[:7]))
+	want := f.sha(f.upstream, "rel")
+	if got := f.sha(f.local, "refs/heads/rel"); got != want {
+		t.Errorf("local rel = %s, want %s", got, want)
+	}
+	// Updated via merge --ff-only, so HEAD follows the branch.
+	if got := f.sha(f.local, "HEAD"); got != want {
+		t.Errorf("local HEAD = %s, want %s", got, want)
+	}
+	if got := f.sha(f.local, "refs/tags/rel"); got != before {
+		t.Errorf("tag rel moved to %s, want it left at %s", got, before)
+	}
+}
+
+// TestGetLocalBranchesDetachedHead checks that the "(HEAD detached at ...)"
+// line printed by `git branch` is not returned as a branch name (#57).
+func TestGetLocalBranchesDetachedHead(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushUpstreamBranch("feature", "feature-1")
+	f.trackRemoteBranch("feature")
+	f.localGit("checkout", "--quiet", "--detach", "main")
+
+	got, err := getLocalBranches()
+	if err != nil {
+		t.Fatalf("getLocalBranches() error: %v", err)
+	}
+	want := []string{"feature", "main"}
+	if !slices.Equal(got, want) {
+		t.Errorf("getLocalBranches() = %q, want %q", got, want)
 	}
 }
 
