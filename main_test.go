@@ -425,6 +425,41 @@ func TestRunDeletesMergedGoneBranch(t *testing.T) {
 	}
 }
 
+// TestRunDeletesCheckedOutBranchWithoutLocalDefault covers a clone without a
+// local default branch where two remotes have one: a plain `git checkout main`
+// is ambiguous there, so the new local main must track the main remote.
+func TestRunDeletesCheckedOutBranchWithoutLocalDefault(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushUpstreamBranch("feature", "feature-1")
+	f.trackRemoteBranch("feature")
+	featureSHA := f.sha(f.local, "feature")
+	f.localGit("checkout", "--quiet", "feature")
+	f.localGit("branch", "--quiet", "-D", "main")
+	// A second remote that also has main. Its name ranks below origin, so
+	// origin stays the main remote.
+	f.localGit("remote", "add", "mirror", f.remote)
+	f.localGit("fetch", "--quiet", "mirror")
+
+	f.upstreamGit("merge", "--quiet", "--ff-only", "feature")
+	f.upstreamGit("push", "--quiet", "origin", "main")
+	f.deleteRemoteBranch("feature")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Switched to branch main.\nDeleted branch feature (was %s).", featureSHA[:7]))
+	if f.localBranchExists("feature") {
+		t.Error("local branch feature still exists")
+	}
+	if f.currentBranch() != "main" {
+		t.Errorf("current branch = %q, want main", f.currentBranch())
+	}
+	if got := f.localGit("rev-parse", "--abbrev-ref", "main@{upstream}"); got != "origin/main" {
+		t.Errorf("main tracks %q, want origin/main", got)
+	}
+}
+
 func TestRunKeepsUnmergedGoneBranch(t *testing.T) {
 	f := newSyncFixture(t)
 	f.pushUpstreamBranch("feature", "feature-1")
