@@ -46,109 +46,70 @@ gh sync
 
 ### What it does
 
-1. **Picks the main remote.** The one given with `--remote`; otherwise the first one that exists out of `upstream`, `github`, `origin`; otherwise the first remote listed by git. In an ordinary clone that is `origin`. In a fork where you added an `upstream` remote, your branches are synced with the parent repository instead.
-2. **Fetches it** with `git fetch --prune`, together with every other remote that a local branch tracks (such as your fork's `origin` when the main remote is `upstream`). When stderr is a terminal, git's fetch progress is shown there. If one of those other remotes can't be fetched, gh-sync warns (`warning: couldn't fetch <remote>; skipping the branches that track it: ...`), skips the branches that track it and exits with `1`.
-3. **Walks every local branch**, except those matching an [exclude pattern](#excluding-branches), and compares it with its counterpart: the configured upstream if the branch tracks the main remote or one of the other fetched remotes, otherwise the branch with the same name on the main remote. Whether a branch is merged is always checked against the main remote's default branch.
+1. **Picks the main remote**: the one given with `--remote`, otherwise the first of `upstream`, `github` and `origin` that exists, otherwise the first remote. In a fork with an `upstream` remote, your branches are synced with the parent repository.
+2. **Fetches it** with `git fetch --prune`, together with every other remote a local branch tracks (such as your fork's `origin`). If one of those can't be fetched, the branches tracking it are skipped with a warning.
+3. **Checks every local branch**, except [excluded](#excluding-branches) ones, against its upstream, or against the same-named branch on the main remote when it has none. Merges are always checked against the main remote's default branch.
 
-| State of the local branch | Action |
+| Local branch | Action |
 | --- | --- |
-| Behind the remote branch | Fast-forwarded: `Updated branch <name> (was <sha>).` |
-| Up to date | Nothing |
-| Has commits that are not on the remote branch (ahead or diverged) | Left untouched: `warning: '<name>' seems to contain unpushed commits` |
-| Upstream branch was deleted, and every commit is in the remote default branch | Deleted: `Deleted branch <name> (was <sha>).` |
-| Upstream branch was deleted, some commits are not in the remote default branch, but a pull request merged into the default branch has the branch tip as its head (squash or rebase merge) | Deleted: `Deleted branch <name> (was <sha>, merged via #<number>).` |
-| Upstream branch was deleted, some commits are not in the remote default branch, and no pull request merged into the default branch has the branch tip as its head | Left untouched: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
-| Tracks a branch git has no remote-tracking ref for, because it is outside the remote's fetch refspec (a single-branch or shallow clone, or `refs/pull/<N>/head` set by `gh pr checkout`) | Nothing (`--verbose` prints a note): the remote branch may still exist |
-| No counterpart on the main remote | Nothing |
+| Behind | Fast-forwarded: `Updated branch <name> (was <sha>).` |
+| Ahead or diverged | Kept: `warning: '<name>' seems to contain unpushed commits` |
+| Upstream deleted, all commits in the default branch | Deleted: `Deleted branch <name> (was <sha>).` |
+| Upstream deleted, tip is the head of a merged pull request (squash or rebase merge) | Deleted: `Deleted branch <name> (was <sha>, merged via #<number>).` |
+| Upstream deleted, otherwise | Kept: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
+| Up to date, or no counterpart on the remote | Nothing |
 
 ### Safety
 
-gh-sync only ever moves branches forward or removes ones that are fully merged:
+- gh-sync never merges, rebases, force-updates or pushes. A branch with local-only commits is always kept.
+- Only a branch whose upstream git pruned (`[gone]`) can be deleted. Branches that never had an upstream, or whose upstream is outside the fetch refspec (a single-branch clone, `refs/pull/<N>/head` from `gh pr checkout`), are never deleted.
+- Merged pull requests are looked up with `gh api graphql`, one request per 50 branches. When that fails (`gh` not authenticated, a remote not on GitHub, an API error, a 30-second timeout), the branch is kept; `--verbose` shows why. SSH host aliases from `~/.ssh/config` and `ssh.github.com` are resolved with `ssh -G`.
+- If the branch to delete is checked out, gh-sync first switches to the default branch (`Switched to branch ...`), creating it from the main remote if needed.
+- A branch checked out in another worktree is skipped with a warning.
 
-- It never merges, rebases, force-updates or pushes. A branch with local-only commits is always left as is.
-- A branch is deleted only when it tracked a branch on a remote (the main remote, or e.g. your fork), git pruned its remote-tracking ref for that branch (`%(upstream:track)` is `[gone]`), and either the local branch has no commits missing from the remote default branch or the head commit of a pull request merged into the default branch is exactly the local branch tip. Branches that never had an upstream are never deleted.
-- These branches are looked up together after the other branches are processed, with one `gh api graphql` request per 50 branches against the main remote's repository, so their messages come last. When the lookup can't be done (`gh` not authenticated, a remote that is not on GitHub, an API error, no answer within 30 seconds), the branches are kept with the "appears not merged" warning; `--verbose` shows why. A branch with commits added after its pull request was merged is also kept.
-- For a main remote reached over SSH, the GitHub host is read from `ssh -G <host>`, so host aliases from `~/.ssh/config` (`Host github-work` / `HostName github.com`) work, and `ssh.github.com` (SSH over port 443) is treated as `github.com`. If `ssh` can't resolve the host, the host in the URL is used.
-- If the branch being deleted is checked out, gh-sync switches to the default branch first and reports it as `Switched to branch ...`. If there is no local default branch, it is created to track the main remote's default branch.
-- A branch checked out in another worktree is neither updated nor deleted. It is skipped with `warning: '<name>' is checked out in another worktree (<path>); not updated` (or `not deleted`), also with `--dry-run`, and does not make the exit status 1.
-
-Worth knowing:
-
-- gh-sync updates your **local** branches only. When you sync a fork against `upstream`, push afterwards to update the fork on GitHub as well (e.g. `git push origin main`).
+gh-sync updates **local** branches only. After syncing a fork against `upstream`, push to update the fork too (e.g. `git push origin main`).
 
 ## Options
 
 | Option | Description |
 | --- | --- |
-| `--verbose` | Print each git command that changes something, and the `gh` command that looks up merged pull requests, as `$ git ...` / `$ gh ...`, to stderr (like hub's `HUB_VERBOSE=1`) |
-| `--dry-run` | Show what would be updated or deleted (`Would update branch ...`, `Would delete branch ...`, preceded by `Would switch to branch ...` when the checked-out branch would be deleted) without changing any local branch. The fetch still runs |
-| `--color=WHEN` | Colorize output: `auto` (default), `always` or `never` |
-| `--remote=NAME` | Use `NAME` as the main remote instead of choosing one automatically. gh-sync fails if no remote has that name |
-| `--exclude=GLOB` | Leave local branches matching `GLOB` alone (neither updated nor deleted). Can be given more than once. See [Excluding branches](#excluding-branches) |
-| `--version` | Print the gh-sync version and exit |
-| `--help` | Print usage to stdout |
+| `--verbose` | Print the git and `gh` commands that change or look something up to stderr, plus notes on skipped branches |
+| `--dry-run` | Print `Would update branch ...` / `Would delete branch ...` without changing any branch. The fetch still runs |
+| `--color=WHEN` | `auto` (default), `always` or `never` |
+| `--remote=NAME` | Use `NAME` as the main remote |
+| `--exclude=GLOB` | Leave branches matching `GLOB` alone. Repeatable. See [Excluding branches](#excluding-branches) |
+| `--version` | Print the version |
+| `--help` | Print usage |
 
-gh-sync takes no positional arguments. Anything that is not an option, such as `gh sync dry-run` (missing `--`) or `gh sync foo --dry-run`, is rejected with `fatal: unexpected argument: ...` and the usage, and nothing is synced.
+gh-sync takes no positional arguments: `gh sync dry-run` (missing `--`) is rejected instead of running a sync.
 
 ### Excluding branches
 
-Branches that match an exclude pattern are skipped entirely: they are never fast-forwarded or deleted. Patterns come from two places, and all of them apply:
+Excluded branches are never fast-forwarded or deleted. Patterns come from `--exclude` and from the `gh-sync.exclude` git config key, and all of them apply:
 
-- the `gh-sync.exclude` git config key, which can hold several values:
-  ```sh
-  git config --add gh-sync.exclude 'wip/*'
-  git config --add gh-sync.exclude 'experiment'
-  ```
-  Use `--global` to apply them to every repository.
-- `--exclude=GLOB` on the command line, repeatable (`gh sync --exclude='wip/*' --exclude=tmp`).
-
-Patterns are matched against the whole local branch name with Go's [`path.Match`](https://pkg.go.dev/path#Match): `*` and `?` do not match `/`, so `wip/*` matches `wip/foo` but not `wip/foo/bar` (add `wip/*/*` for that). An invalid pattern such as `[` stops gh-sync with `fatal: invalid exclude pattern ...` before anything is fetched. `--verbose` prints `note: skipping '<name>' (excluded by '<pattern>')` for each skipped branch.
-
-### Color
-
-Updated branches are shown in green, deleted branches in red, warnings in yellow and errors in bold red.
-
-With `--color=auto`, stdout and stderr are decided independently: each stream is colorized only when it is a terminal (the MSYS2 / Cygwin terminal of Git Bash counts as one). `gh sync | grep Updated` therefore emits no escape sequences even though warnings on the terminal stay colored.
-
-Setting the [`NO_COLOR`](https://no-color.org) environment variable to a non-empty value disables color in `auto` mode (an empty `NO_COLOR=` is ignored). `--color=always` overrides it.
-
-### Output and exit status
-
-- `Updated branch ...`, `Switched to branch ...` and `Deleted branch ...` (`Would update branch ...`, `Would switch to branch ...` and `Would delete branch ...` with `--dry-run`) go to **stdout**.
-- Warnings, errors, `--verbose` logs and git's fetch progress go to **stderr**. A failing git command's message is printed once, inside the warning or error.
-- The exit status is `0` on success, including when branches were skipped with a warning, and `1` when gh-sync could not run (an unexpected argument, not a git repository, no remote, fetch failed), or an update, a deletion or the fetch of another tracked remote failed.
-
-```console
-$ gh sync --verbose
-$ git fetch --prune --quiet --progress origin
-$ git merge --ff-only --quiet refs/remotes/origin/main
-Updated branch main (was 3f2a1bc).
+```sh
+git config --add gh-sync.exclude 'wip/*'   # add --global for every repository
+gh sync --exclude='wip/*' --exclude=tmp
 ```
+
+Patterns are matched against the whole branch name with Go's [`path.Match`](https://pkg.go.dev/path#Match), so `*` does not match `/`: `wip/*` matches `wip/foo` but not `wip/foo/bar`.
+
+### Color and output
+
+Updated branches are green, deleted ones red, warnings yellow and errors bold red. With `--color=auto`, stdout and stderr are each colorized only when they are a terminal, and a non-empty [`NO_COLOR`](https://no-color.org) disables color.
+
+Branch updates, deletions and switches go to stdout; warnings, errors, `--verbose` output and fetch progress go to stderr. The exit status is `1` when gh-sync could not run or an update, deletion or fetch failed, and `0` otherwise, including when branches were skipped with a warning.
 
 ## Troubleshooting
 
 **`could not determine default branch`**
-Even after the fetch, the main remote has no usable `HEAD` reference (it is missing, or points at a branch that no longer exists) and has neither `main` nor `master`. Set it with:
-
-```bash
-git remote set-head <remote> --auto
-```
+The main remote has no usable `HEAD`, `main` or `master`. Set it with `git remote set-head <remote> --auto`.
 
 **`warning: couldn't fast-forward '<name>'`**
-The branch is checked out and local changes would be overwritten. Commit or stash the changes and run `gh sync` again.
-
-**`warning: '<name>' is checked out in another worktree (<path>); not updated`** (or `not deleted`)
-git can't move or delete a branch that another worktree has checked out. Run `git merge --ff-only` in that worktree, or switch it to another branch, or remove it with `git worktree remove <path>`.
+Local changes in the checked-out branch would be overwritten. Commit or stash them and run `gh sync` again.
 
 **`warning: '<name>' upstream config is broken; skipping`**
-`branch.<name>.merge` is missing or invalid. Repair it with:
-
-```bash
-git branch --set-upstream-to=<remote>/<branch> <name>
-```
-
-**The wrong remote is used**
-Without `--remote`, the priority is `upstream`, `github`, `origin`. Name the remote to use with `--remote` (`gh sync --remote=fork`), or rename your remotes accordingly (`git remote rename <old> upstream`).
+`branch.<name>.merge` is missing or invalid. Fix it with `git branch --set-upstream-to=<remote>/<branch> <name>`.
 
 When reporting a bug, please include the output of `gh sync --version` and `gh sync --verbose`.
 
@@ -159,18 +120,15 @@ When reporting a bug, please include the output of `gh sync --version` and `gh s
 
 ## Development
 
-Tool versions and tasks are managed with [mise](https://mise.jdx.dev/). The Go version comes from `go.mod`, and golangci-lint is pinned to the version CI uses.
+Tool versions and tasks are managed with [mise](https://mise.jdx.dev/).
 
 ```bash
 mise run build   # build ./gh-sync
 mise run test    # go test ./...
 mise run lint    # go vet + gofmt check + golangci-lint
-
-./gh-sync --verbose        # run the local build directly
-gh extension install .     # or install the checkout as `gh sync`
 ```
 
-Pushing a `v*` tag builds the binaries for all platforms and publishes a release. See [CLAUDE.md](CLAUDE.md) for the contribution rules that the code and config files don't spell out (keeping both READMEs in sync, pinning the golangci-lint version, updating the workflow lockfile).
+Pushing a `v*` tag publishes a release. See [CLAUDE.md](CLAUDE.md) for the contribution rules.
 
 ## Acknowledgments
 

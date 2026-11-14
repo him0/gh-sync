@@ -245,9 +245,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 	var candidates []squashCandidate
 	for _, branch := range refs.branches {
 		if pattern, ok := matchExclude(excludes, branch.name); ok {
-			if cfg.verbose {
-				fmt.Fprintf(os.Stderr, "note: skipping '%s' (excluded by '%s')\n", branch.name, pattern)
-			}
+			printNote(cfg, "skipping '%s' (excluded by '%s')", branch.name, pattern)
 			continue
 		}
 		if failed[branchToRemote[branch.name]] {
@@ -351,19 +349,9 @@ func (l *stringList) Set(v string) error {
 // nothing.
 func getExcludePatterns(flags []string) ([]string, error) {
 	var patterns []string
-	cmd := exec.Command("git", "config", "--get-all", "gh-sync.exclude")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	output, err := cmd.Output()
-	if err != nil {
-		// Exit code 1 means the key is not set.
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-			if msg := strings.TrimSpace(stderr.String()); msg != "" {
-				return nil, fmt.Errorf("couldn't read gh-sync.exclude: %w: %s", err, msg)
-			}
-			return nil, fmt.Errorf("couldn't read gh-sync.exclude: %w", err)
-		}
+	output, err := gitOutput("config", "--get-all", "gh-sync.exclude")
+	if err != nil && !isExitCode(err, 1) {
+		return nil, fmt.Errorf("couldn't read gh-sync.exclude: %w", err)
 	}
 	for _, line := range strings.Split(string(output), "\n") {
 		if p := strings.TrimSpace(line); p != "" {
@@ -408,24 +396,31 @@ func noColorSet() bool {
 // wraps the error with the captured stderr so callers can surface git's real
 // diagnostic instead of a bare "exit status N".
 func gitOutput(args ...string) ([]byte, error) {
-	cmd := exec.Command("git", args...)
+	return commandOutput(exec.Command("git", args...))
+}
+
+// commandOutput runs cmd and returns its stdout. On failure the captured
+// stderr is wrapped into the error.
+func commandOutput(cmd *exec.Cmd) ([]byte, error) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return out, fmt.Errorf("%w: %s", err, msg)
 		}
 	}
 	return out, err
 }
 
+// isExitCode reports whether err is a command that exited with code.
+func isExitCode(err error, code int) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == code
+}
+
 func checkGitRepo() error {
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Run()
+	return exec.Command("git", "rev-parse", "--git-dir").Run()
 }
 
 // getMainRemote returns the remote named name, or when name is empty the
@@ -514,20 +509,16 @@ func getDefaultBranch(remote *Remote) (string, error) {
 	if err == nil {
 		ref := strings.TrimSpace(string(output))
 		prefix := fmt.Sprintf("refs/remotes/%s/", remote.Name)
-		if strings.HasPrefix(ref, prefix) && hasRemoteBranch(ref) {
+		if strings.HasPrefix(ref, prefix) && refExists(ref) {
 			return strings.TrimPrefix(ref, prefix), nil
 		}
 	}
 
-	// Check if main branch exists on remote. show-ref --verify --quiet only
-	// signals existence through its exit code, so there is no diagnostic to
-	// capture here.
-	if hasRemoteBranch(fmt.Sprintf("refs/remotes/%s/main", remote.Name)) {
+	// Otherwise fall back to main, then master.
+	if refExists(fmt.Sprintf("refs/remotes/%s/main", remote.Name)) {
 		return "main", nil
 	}
-
-	// Check if master branch exists on remote
-	if hasRemoteBranch(fmt.Sprintf("refs/remotes/%s/master", remote.Name)) {
+	if refExists(fmt.Sprintf("refs/remotes/%s/master", remote.Name)) {
 		return "master", nil
 	}
 
@@ -537,7 +528,7 @@ func getDefaultBranch(remote *Remote) (string, error) {
 // getCurrentBranch returns the name of the checked-out branch. It strips
 // "refs/heads/" itself rather than using `symbolic-ref --short`, which prints
 // "heads/<name>" when a tag has the same name, so the result matches the
-// names returned by getLocalBranches.
+// names returned by readRefs.
 func getCurrentBranch() (string, error) {
 	output, err := gitOutput("symbolic-ref", "HEAD")
 	if err != nil {
@@ -558,19 +549,12 @@ var configRemoteRe = regexp.MustCompile(`^branch\.(.+?)\.remote\s+(\S+)`)
 func getBranchToRemoteMapping() (map[string]string, error) {
 	branchToRemote := make(map[string]string)
 
-	cmd := exec.Command("git", "config", "--get-regexp", `^branch\..*\.remote$`)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	output, err := cmd.Output()
+	output, err := gitOutput("config", "--get-regexp", `^branch\..*\.remote$`)
 	if err != nil {
 		// git config exits 1 when no entries match — that's expected for a
 		// fresh repo with no tracked branches and is not a failure.
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+		if isExitCode(err, 1) {
 			return branchToRemote, nil
-		}
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return nil, fmt.Errorf("%w: %s", err, msg)
 		}
 		return nil, err
 	}
@@ -606,11 +590,11 @@ type localBranch struct {
 	worktreePath string
 }
 
-// refSnapshot is the state of the local branches and the main remote's
-// remote-tracking refs of the fetched remotes, read with one git call.
+// refSnapshot is the state of the local branches and of the remote-tracking
+// refs of the fetched remotes, read with one git call.
 type refSnapshot struct {
 	branches []localBranch
-	// remoteRefs holds the full names of the remote-tracking refs read.
+	// remoteRefs holds the full names of those remote-tracking refs.
 	remoteRefs map[string]bool
 }
 
@@ -634,13 +618,8 @@ func readRefs(remotes []string) (refSnapshot, error) {
 	cmd := exec.Command("git", args...)
 	// %(upstream:track) is translated; the C locale keeps it parseable.
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	output, err := cmd.Output()
+	output, err := commandOutput(cmd)
 	if err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return refSnapshot{}, fmt.Errorf("%w: %s", err, msg)
-		}
 		return refSnapshot{}, err
 	}
 	return parseRefs(string(output))
@@ -758,9 +737,7 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 				// is outside remote.<name>.fetch (a single-branch or shallow
 				// clone, or refs/pull/<N>/head from `gh pr checkout`). The
 				// remote branch may well exist, so this is not "gone".
-				if cfg.verbose {
-					fmt.Fprintf(os.Stderr, "note: '%s' has no remote-tracking ref for its upstream; skipping\n", branch)
-				}
+				printNote(cfg, "'%s' has no remote-tracking ref for its upstream; skipping", branch)
 				return nil
 			}
 			// %(upstream:track) is "[gone]": the remote-tracking ref existed
@@ -769,12 +746,12 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 		}
 	} else if remoteRefs[sameName] {
 		remoteBranch = sameName
-		if branchToRemote[branch] == "" && cfg.verbose {
+		if branchToRemote[branch] == "" {
 			// No upstream config, but a same-named ref exists on the main
 			// remote. Fast-forward by name match (mirrors hub sync), but emit
 			// a hint so the user knows two unrelated branches with the same
 			// name are being treated as related.
-			fmt.Fprintf(os.Stderr, "note: '%s' has no upstream config; matching by name against %s/%s\n", branch, remote.Name, branch)
+			printNote(cfg, "'%s' has no upstream config; matching by name against %s/%s", branch, remote.Name, branch)
 		}
 	}
 
@@ -792,7 +769,7 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 			return nil
 		case ahead == 0 && behind > 0:
 			oldCommit := b.tip
-			if inOtherWorktree(b, *currentBranch) {
+			if inOtherWorktree(branch, b.worktreePath, *currentBranch) {
 				// git refuses to move it; say why instead of failing.
 				printWarning(cfg.stderrColors, "'%s' is checked out in another worktree (%s); not updated", branch, b.worktreePath)
 				return nil
@@ -839,10 +816,10 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 	return deleteBranch(cfg, branch, b.tip, b.worktreePath, "", currentBranch, remote.Name, defaultBranch)
 }
 
-// inOtherWorktree reports whether b is checked out in a worktree other than
-// the current one, whose checked-out branch is currentBranch.
-func inOtherWorktree(b localBranch, currentBranch string) bool {
-	return b.worktreePath != "" && b.name != currentBranch
+// inOtherWorktree reports whether branch is checked out (at worktreePath) in
+// a worktree other than the current one, whose branch is currentBranch.
+func inOtherWorktree(branch, worktreePath, currentBranch string) bool {
+	return worktreePath != "" && branch != currentBranch
 }
 
 // deleteBranch deletes branch, checking out defaultBranch first when branch
@@ -851,7 +828,7 @@ func inOtherWorktree(b localBranch, currentBranch string) bool {
 // warning, since git refuses to delete it. With --dry-run it only reports
 // what it would do.
 func deleteBranch(cfg runConfig, branch, oldCommit, worktreePath, reason string, currentBranch *string, remoteName, defaultBranch string) error {
-	if inOtherWorktree(localBranch{name: branch, worktreePath: worktreePath}, *currentBranch) {
+	if inOtherWorktree(branch, worktreePath, *currentBranch) {
 		printWarning(cfg.stderrColors, "'%s' is checked out in another worktree (%s); not deleted", branch, worktreePath)
 		return nil
 	}
@@ -887,7 +864,7 @@ func deleteBranch(cfg runConfig, branch, oldCommit, worktreePath, reason string,
 // several remotes have one (a fork with origin and upstream). The local branch
 // is then created explicitly from the main remote instead.
 func checkoutDefaultBranchArgs(remoteName, defaultBranch string) []string {
-	if hasRemoteBranch("refs/heads/" + defaultBranch) {
+	if refExists("refs/heads/" + defaultBranch) {
 		return []string{"checkout", "--quiet", defaultBranch}
 	}
 	return []string{"checkout", "--quiet", "-b", defaultBranch, "--track", "refs/remotes/" + remoteName + "/" + defaultBranch}
@@ -910,11 +887,6 @@ const mergedPRChunkSize = 50
 // or whose lookup failed, are absent; the caller keeps them with the usual
 // warning. Failures are only reported with --verbose.
 func lookupMergedPRs(cfg runConfig, remote Remote, base string, candidates []squashCandidate) map[string]int {
-	note := func(format string, args ...any) {
-		if cfg.verbose {
-			fmt.Fprintf(os.Stderr, "note: "+format+"\n", args...)
-		}
-	}
 	// The upstream ref is gone, so @{upstream} can't be resolved; the branch
 	// name on the remote (which may differ from the local name) is still in
 	// branch.<name>.merge. Two local branches may track the same one.
@@ -922,13 +894,9 @@ func lookupMergedPRs(cfg runConfig, remote Remote, base string, candidates []squ
 	var heads []string
 	seen := make(map[string]bool)
 	for _, c := range candidates {
-		if c.tip == "" {
-			note("couldn't look up a merged pull request for '%s': couldn't read the branch tip", c.branch)
-			continue
-		}
 		head, err := upstreamBranchName(c.branch)
 		if err != nil {
-			note("couldn't look up a merged pull request for '%s': %s", c.branch, err.Error())
+			printNote(cfg, "couldn't look up a merged pull request for '%s': %s", c.branch, err.Error())
 			continue
 		}
 		headOf[c.branch] = head
@@ -943,7 +911,7 @@ func lookupMergedPRs(cfg runConfig, remote Remote, base string, candidates []squ
 		chunk := heads[start:min(start+mergedPRChunkSize, len(heads))]
 		prs, err := cfg.findMergedPRs(cfg, remote, base, chunk)
 		if err != nil {
-			note("couldn't look up merged pull requests: %s", err.Error())
+			printNote(cfg, "couldn't look up merged pull requests: %s", err.Error())
 			continue
 		}
 		maps.Copy(found, prs)
@@ -1013,16 +981,11 @@ func findMergedPRsWithGh(cfg runConfig, remote Remote, base string, heads []stri
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	cmd.Stdin = strings.NewReader(query)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	output, err := cmd.Output()
+	output, err := commandOutput(cmd)
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("gh api graphql: timed out after %s", ghTimeout)
 	}
 	if err != nil {
-		if msg := strings.TrimSpace(stderr.String()); msg != "" {
-			return nil, fmt.Errorf("gh api graphql: %w: %s", err, msg)
-		}
 		return nil, fmt.Errorf("gh api graphql: %w", err)
 	}
 	return parseMergedPRResponse(output, heads)
@@ -1152,8 +1115,8 @@ func resolveGitHubHost(cfg runConfig, rawURL, host string) string {
 		out, err = exec.CommandContext(ctx, "ssh", args...).Output()
 		cancel()
 	}
-	if err != nil && cfg.verbose {
-		fmt.Fprintf(os.Stderr, "note: couldn't resolve SSH host '%s': %s\n", host, err.Error())
+	if err != nil {
+		printNote(cfg, "couldn't resolve SSH host '%s': %s", host, err.Error())
 	}
 	resolved := sshResolvedHost(host, out, err)
 	if cfg.sshHosts != nil {
@@ -1196,9 +1159,9 @@ func isSSHURL(raw string) bool {
 	return m != nil && len(m[1]) > 1
 }
 
-func hasRemoteBranch(remoteBranch string) bool {
-	cmd := exec.Command("git", "show-ref", "--verify", "--quiet", remoteBranch)
-	return cmd.Run() == nil
+// refExists reports whether the full ref name exists.
+func refExists(ref string) bool {
+	return exec.Command("git", "show-ref", "--verify", "--quiet", ref).Run() == nil
 }
 
 func getCommitDifference(branch1, branch2 string) (ahead, behind int, err error) {
@@ -1242,16 +1205,7 @@ func shortSHA(sha string) string {
 // is not printed here as well (even with --verbose).
 func runGitSilent(cfg runConfig, args ...string) error {
 	verboseLog(cfg, "git", args)
-	cmd := exec.Command("git", args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg != "" {
-			return fmt.Errorf("%w: %s", err, msg)
-		}
-	}
+	_, err := gitOutput(args...)
 	return err
 }
 
@@ -1278,8 +1232,7 @@ func verboseLog(cfg runConfig, cmd string, args []string) {
 // colorizeOutput resolves whether a single output stream should be colorized.
 // isTerminal reports whether that stream is a terminal and noColor whether the
 // NO_COLOR environment variable (https://no-color.org) is set to a non-empty
-// value. run() calls it
-// once per stream (stdout and stderr) so each is decided independently.
+// value. run() calls it once per stream, so each is decided independently.
 //
 //   - "always": colorize regardless of isTerminal and noColor.
 //   - "never":  never colorize.
@@ -1306,4 +1259,11 @@ func printError(colors colorConfig, format string, args ...any) {
 // are enabled.
 func printWarning(colors colorConfig, format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "%swarning: %s%s\n", colors.yellow, fmt.Sprintf(format, args...), colors.reset)
+}
+
+// printNote prints "note: <message>" to stderr with --verbose only.
+func printNote(cfg runConfig, format string, args ...any) {
+	if cfg.verbose {
+		fmt.Fprintf(os.Stderr, "note: %s\n", fmt.Sprintf(format, args...))
+	}
 }

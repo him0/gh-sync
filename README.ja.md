@@ -46,109 +46,70 @@ gh sync
 
 ### 動作
 
-1. **main remote を決めます。** `--remote` で指定した remote を使います。指定が無ければ `upstream`、`github`、`origin` の順に探して最初に見つかったものを使い、どれも無ければ git が最初に列挙する remote を使います。通常の clone では `origin` です。fork に `upstream` を追加している場合は、代わりに親リポジトリと同期します。
-2. `git fetch --prune` で **その remote を fetch します。** ローカルブランチが追跡しているほかの remote(main remote が `upstream` のときの fork の `origin` など)も一緒に fetch します。stderr が端末のときは、fetch の進捗がそこに表示されます。ほかの remote の fetch に失敗した場合は警告(`warning: couldn't fetch <remote>; skipping the branches that track it: ...`)を出し、その remote を追跡するブランチをスキップして、終了ステータスを `1` にします。
-3. [除外パターン](#ブランチの除外)に一致するものを除いて **すべてのローカルブランチを順に調べ**、対応するブランチと比較します。main remote か、fetch したほかの remote を追跡していれば設定済みの upstream と、そうでなければ main remote 上の同名のブランチと比較します。マージ済みかどうかは、常に main remote のデフォルトブランチに対して判定します。
+1. **main remote を決めます。** `--remote` で指定した remote、無ければ `upstream`、`github`、`origin` のうち最初に見つかったもの、どれも無ければ最初の remote を使います。fork に `upstream` を追加している場合は、親リポジトリと同期します。
+2. `git fetch --prune` で **その remote を fetch します。** ローカルブランチが追跡しているほかの remote(fork の `origin` など)も一緒に fetch します。fetch できなかった remote を追跡するブランチは、警告を出してスキップします。
+3. [除外](#ブランチの除外)したものを除く **すべてのローカルブランチを** upstream と、upstream が無ければ main remote 上の同名のブランチと比較します。マージ済みかどうかは、常に main remote のデフォルトブランチに対して判定します。
 
-| ローカルブランチの状態 | 動作 |
+| ローカルブランチ | 動作 |
 | --- | --- |
-| リモートブランチより遅れている | fast-forward する: `Updated branch <name> (was <sha>).` |
-| 最新 | 何もしない |
-| リモートブランチに無いコミットがある(先行または分岐) | 触らない: `warning: '<name>' seems to contain unpushed commits` |
-| upstream ブランチが削除済みで、全コミットがリモートのデフォルトブランチに含まれる | 削除する: `Deleted branch <name> (was <sha>).` |
-| upstream ブランチが削除済みで、リモートのデフォルトブランチに無いコミットがあるが、デフォルトブランチにマージ済みの pull request の head がブランチの先頭と一致する(squash や rebase でのマージ) | 削除する: `Deleted branch <name> (was <sha>, merged via #<number>).` |
-| upstream ブランチが削除済みで、リモートのデフォルトブランチに無いコミットがあり、head がブランチの先頭と一致する、デフォルトブランチにマージ済みの pull request も無い | 触らない: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
-| 追跡しているブランチが remote の fetch refspec の対象外で、remote-tracking ref が無い(single-branch クローンや shallow クローン、`gh pr checkout` が設定する `refs/pull/<N>/head`) | 何もしない(`--verbose` で note を表示): remote のブランチは残っている可能性がある |
-| main remote に対応するブランチが無い | 何もしない |
+| 遅れている | fast-forward する: `Updated branch <name> (was <sha>).` |
+| 先行または分岐している | 残す: `warning: '<name>' seems to contain unpushed commits` |
+| upstream が削除済みで、全コミットがデフォルトブランチに含まれる | 削除する: `Deleted branch <name> (was <sha>).` |
+| upstream が削除済みで、先頭がマージ済み pull request の head と一致する(squash や rebase でのマージ) | 削除する: `Deleted branch <name> (was <sha>, merged via #<number>).` |
+| upstream が削除済みで、それ以外 | 残す: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
+| 最新、または remote に対応するブランチが無い | 何もしない |
 
 ### 安全性
 
-gh-sync が行うのは、ブランチを前に進めることと、完全にマージ済みのブランチを削除することだけです。
+- merge、rebase、強制更新、push は一切しません。ローカルにしか無いコミットを持つブランチは必ず残ります。
+- 削除されうるのは、upstream を git が prune した(`[gone]`)ブランチだけです。upstream を一度も設定していないブランチや、upstream が fetch refspec の対象外のブランチ(single-branch クローン、`gh pr checkout` による `refs/pull/<N>/head`)は削除しません。
+- マージ済み pull request は `gh api graphql` で 50 本ごとに 1 リクエストで確認します。確認できない場合(`gh` が未認証、GitHub 以外の remote、API エラー、30 秒のタイムアウト)はブランチを残し、理由は `--verbose` で表示します。`~/.ssh/config` のホストエイリアスや `ssh.github.com` は `ssh -G` で解決します。
+- 削除するブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替えます(`Switched to branch ...`)。ローカルに無ければ main remote から作成します。
+- 別の worktree でチェックアウトされているブランチは、警告を出してスキップします。
 
-- merge、rebase、強制更新、push は一切しません。ローカルにしか無いコミットを持つブランチは必ずそのまま残ります。
-- ブランチを削除するのは、remote(main remote や fork など)のブランチを追跡していて、git がそのブランチの remote-tracking ref を prune しており(`%(upstream:track)` が `[gone]`)、かつリモートのデフォルトブランチに無いコミットを持たないか、デフォルトブランチにマージ済みの pull request の head コミットがローカルブランチの先頭と完全に一致する場合だけです。upstream を一度も設定していないブランチは削除しません。
-- こうしたブランチは、ほかのブランチの処理が終わったあとに、main remote のリポジトリに対する `gh api graphql` のリクエスト(50 本ごとに 1 回)でまとめて確認します。そのため、これらのメッセージは最後に出力されます。確認できない場合(`gh` が未認証、GitHub 以外の remote、API エラー、30 秒以内に応答が無い)は「appears not merged」の警告を出してブランチを残します。理由は `--verbose` で表示されます。pull request のマージ後にコミットを追加したブランチも残します。
-- main remote が SSH の場合、GitHub のホスト名は `ssh -G <host>` から読みます。そのため `~/.ssh/config` のホストエイリアス(`Host github-work` / `HostName github.com`)も使え、`ssh.github.com`(443 番ポート経由の SSH)は `github.com` として扱います。`ssh` でホスト名を引けない場合は URL のホスト名を使います。
-- 削除対象のブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替え、`Switched to branch ...` と表示します。ローカルにデフォルトブランチが無い場合は、main remote のデフォルトブランチを追跡するブランチとして作成します。
-- 別の worktree でチェックアウトされているブランチは、更新も削除もしません。`warning: '<name>' is checked out in another worktree (<path>); not updated`(または `not deleted`)と表示してスキップし(`--dry-run` でも同じ)、終了ステータスは 1 になりません。
-
-知っておくとよい点:
-
-- gh-sync が更新するのは**ローカル**のブランチだけです。fork を `upstream` と同期した場合、GitHub 上の fork も更新するには、あとで push してください(例: `git push origin main`)。
+gh-sync が更新するのは**ローカル**のブランチだけです。fork を `upstream` と同期したあと、fork も更新するには push してください(例: `git push origin main`)。
 
 ## オプション
 
 | オプション | 説明 |
 | --- | --- |
-| `--verbose` | 変更を伴う git コマンドと、マージ済み pull request を検索する `gh` コマンドを、`$ git ...` / `$ gh ...` の形式で stderr に表示する(hub の `HUB_VERBOSE=1` 相当) |
-| `--dry-run` | 更新・削除されるブランチを表示する(`Would update branch ...`、`Would delete branch ...`。チェックアウト中のブランチが削除される場合は、その前に `Would switch to branch ...`)だけで、ローカルブランチは変更しない。fetch は実行する |
-| `--color=WHEN` | 出力に色を付ける: `auto`(デフォルト)、`always`、`never` |
-| `--remote=NAME` | main remote を自動で選ばず、`NAME` を使う。その名前の remote が無ければエラーになる |
-| `--exclude=GLOB` | `GLOB` に一致するローカルブランチには触れない(更新も削除もしない)。複数回指定できる。[ブランチの除外](#ブランチの除外)を参照 |
-| `--version` | gh-sync のバージョンを表示して終了する |
-| `--help` | 使い方を stdout に表示する |
+| `--verbose` | 変更や検索を行う git・`gh` コマンドと、スキップしたブランチの note を stderr に表示する |
+| `--dry-run` | ブランチを変更せずに `Would update branch ...` / `Would delete branch ...` を表示する。fetch は実行する |
+| `--color=WHEN` | `auto`(デフォルト)、`always`、`never` |
+| `--remote=NAME` | `NAME` を main remote として使う |
+| `--exclude=GLOB` | `GLOB` に一致するブランチには触れない。複数回指定可。[ブランチの除外](#ブランチの除外)を参照 |
+| `--version` | バージョンを表示する |
+| `--help` | 使い方を表示する |
 
-gh-sync は位置引数を取りません。`gh sync dry-run`(`--` の付け忘れ)や `gh sync foo --dry-run` のようにオプション以外の引数を渡すと、`fatal: unexpected argument: ...` と使い方を表示してエラーになり、同期は行いません。
+gh-sync は位置引数を取りません。`gh sync dry-run`(`--` の付け忘れ)は同期せずにエラーになります。
 
 ### ブランチの除外
 
-除外パターンに一致するブランチは完全にスキップされ、fast-forward も削除もされません。パターンは次の 2 か所から読み込まれ、すべてが適用されます。
+除外したブランチは fast-forward も削除もされません。パターンは `--exclude` と git config の `gh-sync.exclude` から読み込み、すべてを適用します。
 
-- git config の `gh-sync.exclude`(複数の値を持てます)
-  ```sh
-  git config --add gh-sync.exclude 'wip/*'
-  git config --add gh-sync.exclude 'experiment'
-  ```
-  `--global` を付けるとすべてのリポジトリに適用されます。
-- コマンドラインの `--exclude=GLOB`(複数回指定可: `gh sync --exclude='wip/*' --exclude=tmp`)
-
-パターンはローカルブランチ名全体に対して Go の [`path.Match`](https://pkg.go.dev/path#Match) で照合します。`*` と `?` は `/` に一致しないため、`wip/*` は `wip/foo` には一致しますが `wip/foo/bar` には一致しません(その場合は `wip/*/*` も追加してください)。`[` のような不正なパターンがあると、fetch の前に `fatal: invalid exclude pattern ...` で終了します。`--verbose` を付けると、スキップしたブランチごとに `note: skipping '<name>' (excluded by '<pattern>')` を表示します。
-
-### 色
-
-更新したブランチは緑、削除したブランチは赤、警告は黄、エラーは太字の赤で表示します。
-
-`--color=auto` では stdout と stderr を別々に判定し、それぞれ端末(Git Bash の MSYS2 / Cygwin 端末を含む)に接続されているときだけ色を付けます。そのため `gh sync | grep Updated` ではエスケープシーケンスが出力されず、端末に出る警告には色が付いたままになります。
-
-環境変数 [`NO_COLOR`](https://no-color.org) に空でない値を設定すると、`auto` では色が無効になります(空の `NO_COLOR=` は無視します)。`--color=always` はこれより優先されます。
-
-### 出力と終了ステータス
-
-- `Updated branch ...`、`Switched to branch ...`、`Deleted branch ...`(`--dry-run` では `Would update branch ...`、`Would switch to branch ...`、`Would delete branch ...`)は **stdout** に出力されます。
-- 警告、エラー、`--verbose` のログ、git の fetch の進捗は **stderr** に出力されます。失敗した git コマンドのメッセージは、警告やエラーの中に 1 回だけ表示されます。
-- 終了ステータスは、成功時(警告を出してブランチをスキップした場合を含む)が `0`、実行できなかったとき(想定外の引数がある、git リポジトリではない、remote が無い、fetch に失敗した)や、更新・削除、追跡しているほかの remote の fetch に失敗したときが `1` です。
-
-```console
-$ gh sync --verbose
-$ git fetch --prune --quiet --progress origin
-$ git merge --ff-only --quiet refs/remotes/origin/main
-Updated branch main (was 3f2a1bc).
+```sh
+git config --add gh-sync.exclude 'wip/*'   # --global ですべてのリポジトリに適用
+gh sync --exclude='wip/*' --exclude=tmp
 ```
+
+パターンはブランチ名全体に対して Go の [`path.Match`](https://pkg.go.dev/path#Match) で照合するため、`*` は `/` に一致しません。`wip/*` は `wip/foo` に一致しますが、`wip/foo/bar` には一致しません。
+
+### 色と出力
+
+更新したブランチは緑、削除したブランチは赤、警告は黄、エラーは太字の赤で表示します。`--color=auto` では stdout と stderr をそれぞれ端末のときだけ色付けし、空でない [`NO_COLOR`](https://no-color.org) があれば色を付けません。
+
+ブランチの更新・削除・切り替えは stdout に、警告、エラー、`--verbose` の出力、fetch の進捗は stderr に出力します。終了ステータスは、実行できなかったときや更新・削除・fetch に失敗したときは `1`、それ以外(警告を出してスキップした場合を含む)は `0` です。
 
 ## トラブルシューティング
 
 **`could not determine default branch`**
-fetch した後も、main remote に使える `HEAD` の参照が無く(参照が無いか、もう存在しないブランチを指している)、`main` も `master` もありません。次のコマンドで設定してください。
-
-```bash
-git remote set-head <remote> --auto
-```
+main remote に使える `HEAD`、`main`、`master` がありません。`git remote set-head <remote> --auto` で設定してください。
 
 **`warning: couldn't fast-forward '<name>'`**
-チェックアウト中のブランチでローカルの変更が上書きされてしまいます。変更を commit または stash してから、もう一度 `gh sync` を実行してください。
-
-**`warning: '<name>' is checked out in another worktree (<path>); not updated`**(または `not deleted`)
-別の worktree でチェックアウトされているブランチは、git が移動も削除もさせません。その worktree で `git merge --ff-only` を実行するか、別のブランチに切り替えるか、`git worktree remove <path>` で削除してください。
+チェックアウト中のブランチのローカルの変更が上書きされてしまいます。commit か stash をしてから、もう一度 `gh sync` を実行してください。
 
 **`warning: '<name>' upstream config is broken; skipping`**
-`branch.<name>.merge` が無いか、不正です。次のコマンドで直してください。
-
-```bash
-git branch --set-upstream-to=<remote>/<branch> <name>
-```
-
-**意図しない remote が使われる**
-`--remote` を指定しない場合の優先順位は `upstream`、`github`、`origin` です。使う remote を `--remote` で指定するか(`gh sync --remote=fork`)、これに合わせて remote の名前を変更してください(`git remote rename <old> upstream`)。
+`branch.<name>.merge` が無いか、不正です。`git branch --set-upstream-to=<remote>/<branch> <name>` で直してください。
 
 バグを報告するときは、`gh sync --version` と `gh sync --verbose` の出力を添えてください。
 
@@ -159,18 +120,15 @@ git branch --set-upstream-to=<remote>/<branch> <name>
 
 ## 開発
 
-ツールのバージョンとタスクは [mise](https://mise.jdx.dev/) で管理しています。Go のバージョンは `go.mod` から読み込み、golangci-lint は CI と同じバージョンに固定しています。
+ツールのバージョンとタスクは [mise](https://mise.jdx.dev/) で管理しています。
 
 ```bash
 mise run build   # ./gh-sync をビルドする
 mise run test    # go test ./...
 mise run lint    # go vet、gofmt のチェック、golangci-lint
-
-./gh-sync --verbose        # ローカルビルドを直接実行する
-gh extension install .     # またはチェックアウトを `gh sync` としてインストールする
 ```
 
-`v*` タグを push すると、全プラットフォーム向けのバイナリがビルドされ、リリースが公開されます。コードや設定ファイルからは読み取れない開発上の決まり（README の両言語版の更新、golangci-lint のバージョン固定、workflow のロックファイルの更新）は [CLAUDE.md](CLAUDE.md) を参照してください。
+`v*` タグを push するとリリースが公開されます。開発上の決まりは [CLAUDE.md](CLAUDE.md) を参照してください。
 
 ## 謝辞
 
