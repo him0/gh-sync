@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -116,11 +117,15 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		verbose     bool
 		dryRun      bool
 		colorFlag   string
+		remoteFlag  string
+		excludeFlag stringList
 		showVersion bool
 	)
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
 	fs.BoolVar(&dryRun, "dry-run", false, "show what would be updated or deleted without changing branches")
 	fs.StringVar(&colorFlag, "color", "auto", "colorize output (always, never, auto)")
+	fs.StringVar(&remoteFlag, "remote", "", "sync against this remote instead of the automatically chosen one")
+	fs.Var(&excludeFlag, "exclude", "skip local branches matching this glob (repeatable)")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	// fs.Parse calls fs.Usage both for --help and for parse errors, so it
 	// cannot tell which stream to use. Print the usage after Parse instead:
@@ -171,7 +176,13 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		return err
 	}
 
-	remote, remotes, err := getMainRemote()
+	excludes, err := getExcludePatterns(excludeFlag)
+	if err != nil {
+		printError(cfg.stderrColors, "fatal: %s", err.Error())
+		return err
+	}
+
+	remote, remotes, err := getMainRemote(remoteFlag)
 	if err != nil {
 		printError(cfg.stderrColors, "%s", err.Error())
 		return err
@@ -228,6 +239,12 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 
 	var candidates []squashCandidate
 	for _, branch := range refs.branches {
+		if pattern, ok := matchExclude(excludes, branch.name); ok {
+			if cfg.verbose {
+				fmt.Fprintf(os.Stderr, "note: skipping '%s' (excluded by '%s')\n", branch.name, pattern)
+			}
+			continue
+		}
 		if failed[branchToRemote[branch.name]] {
 			continue
 		}
@@ -246,7 +263,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 				printWarning(cfg.stderrColors, "'%s' was deleted on %s, but appears not merged into '%s'", c.branch, branchToRemote[c.branch], defaultBranch)
 				continue
 			}
-			if derr := deleteBranch(cfg, c.branch, c.tip, fmt.Sprintf(", merged via #%d", pr), &currentBranch, defaultBranch); derr != nil {
+			if derr := deleteBranch(cfg, c.branch, c.tip, fmt.Sprintf(", merged via #%d", pr), &currentBranch, remote.Name, defaultBranch); derr != nil {
 				hadFailure = true
 			}
 		}
@@ -297,6 +314,10 @@ Options:
         show what would be updated or deleted without changing branches
   --color string
         colorize output (always, never, auto) (default "auto")
+  --remote name
+        sync against this remote instead of the automatically chosen one
+  --exclude glob
+        skip local branches matching this glob (repeatable)
   --version
         print version and exit
 `
@@ -305,6 +326,65 @@ func printUsage(w io.Writer) {
 	// Like the other writes to stdout/stderr, a failed write has nowhere
 	// better to be reported.
 	_, _ = fmt.Fprint(w, usageText)
+}
+
+// stringList is a flag.Value that collects every occurrence of a repeatable
+// flag.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(v string) error {
+	*l = append(*l, v)
+	return nil
+}
+
+// getExcludePatterns returns the branch exclude patterns: every
+// gh-sync.exclude value from git config followed by the --exclude flags.
+// Both sources add to the set; neither replaces the other. A pattern that
+// path.Match cannot parse is an error, so a typo doesn't silently match
+// nothing.
+func getExcludePatterns(flags []string) ([]string, error) {
+	var patterns []string
+	cmd := exec.Command("git", "config", "--get-all", "gh-sync.exclude")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		// Exit code 1 means the key is not set.
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			if msg := strings.TrimSpace(stderr.String()); msg != "" {
+				return nil, fmt.Errorf("couldn't read gh-sync.exclude: %w: %s", err, msg)
+			}
+			return nil, fmt.Errorf("couldn't read gh-sync.exclude: %w", err)
+		}
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			patterns = append(patterns, p)
+		}
+	}
+	patterns = append(patterns, flags...)
+	for _, p := range patterns {
+		if _, err := path.Match(p, ""); err != nil {
+			return nil, fmt.Errorf("invalid exclude pattern %q: %w", p, err)
+		}
+	}
+	return patterns, nil
+}
+
+// matchExclude returns the first pattern in patterns that matches branch.
+// Patterns use path.Match syntax, so "*" does not cross a "/": "wip/*"
+// matches "wip/foo" but not "wip/foo/bar".
+func matchExclude(patterns []string, branch string) (string, bool) {
+	for _, p := range patterns {
+		// Patterns were validated by getExcludePatterns.
+		if ok, _ := path.Match(p, branch); ok {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // isTerminal reports whether fd is a terminal, including the MSYS2 / Cygwin
@@ -343,14 +423,25 @@ func checkGitRepo() error {
 	return cmd.Run()
 }
 
-// getMainRemote returns the main remote and all remotes.
-func getMainRemote() (*Remote, []Remote, error) {
+// getMainRemote returns the remote named name, or when name is empty the
+// first of upstream, github and origin that exists, else the first remote.
+// It also returns all remotes.
+func getMainRemote(name string) (*Remote, []Remote, error) {
 	// Priority order: upstream, github, origin, others
 	priorityOrder := []string{"upstream", "github", "origin"}
 
 	remotes, err := getRemotes()
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if name != "" {
+		for _, remote := range remotes {
+			if remote.Name == name {
+				return &remote, remotes, nil
+			}
+		}
+		return nil, nil, fmt.Errorf("fatal: no such remote '%s'", name)
 	}
 
 	if len(remotes) == 0 {
@@ -730,18 +821,18 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 		*candidates = append(*candidates, squashCandidate{branch: branch, tip: b.tip})
 		return nil
 	}
-	return deleteBranch(cfg, branch, b.tip, "", currentBranch, defaultBranch)
+	return deleteBranch(cfg, branch, b.tip, "", currentBranch, remote.Name, defaultBranch)
 }
 
 // deleteBranch deletes branch, checking out defaultBranch first when branch
 // is checked out. reason is appended to the "(was <sha>" part of the message.
 // With --dry-run it only reports what it would do.
-func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch *string, defaultBranch string) error {
+func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch *string, remoteName, defaultBranch string) error {
 	if branch == *currentBranch {
 		if cfg.dryRun {
 			fmt.Printf("Would switch to branch %s.\n", defaultBranch)
 		} else {
-			if err := runGitSilent(cfg, "checkout", "--quiet", defaultBranch); err != nil {
+			if err := runGitSilent(cfg, checkoutDefaultBranchArgs(remoteName, defaultBranch)...); err != nil {
 				printWarning(cfg.stderrColors, "couldn't checkout '%s': %s", defaultBranch, err.Error())
 				return err
 			}
@@ -761,6 +852,18 @@ func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch
 	}
 	fmt.Printf("%sDeleted branch %s%s%s (was %s%s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit), reason)
 	return nil
+}
+
+// checkoutDefaultBranchArgs returns the git arguments that switch to
+// defaultBranch. Without a local branch of that name, a plain checkout makes
+// git guess the remote-tracking branch to create it from, which fails when
+// several remotes have one (a fork with origin and upstream). The local branch
+// is then created explicitly from the main remote instead.
+func checkoutDefaultBranchArgs(remoteName, defaultBranch string) []string {
+	if hasRemoteBranch("refs/heads/" + defaultBranch) {
+		return []string{"checkout", "--quiet", defaultBranch}
+	}
+	return []string{"checkout", "--quiet", "-b", defaultBranch, "--track", "refs/remotes/" + remoteName + "/" + defaultBranch}
 }
 
 // squashCandidate is a gone branch whose commits are not in the default

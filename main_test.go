@@ -513,6 +513,41 @@ func TestRunDeletesMergedGoneBranch(t *testing.T) {
 	}
 }
 
+// TestRunDeletesCheckedOutBranchWithoutLocalDefault covers a clone without a
+// local default branch where two remotes have one: a plain `git checkout main`
+// is ambiguous there, so the new local main must track the main remote.
+func TestRunDeletesCheckedOutBranchWithoutLocalDefault(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushUpstreamBranch("feature", "feature-1")
+	f.trackRemoteBranch("feature")
+	featureSHA := f.sha(f.local, "feature")
+	f.localGit("checkout", "--quiet", "feature")
+	f.localGit("branch", "--quiet", "-D", "main")
+	// A second remote that also has main. Its name ranks below origin, so
+	// origin stays the main remote.
+	f.localGit("remote", "add", "mirror", f.remote)
+	f.localGit("fetch", "--quiet", "mirror")
+
+	f.upstreamGit("merge", "--quiet", "--ff-only", "feature")
+	f.upstreamGit("push", "--quiet", "origin", "main")
+	f.deleteRemoteBranch("feature")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Switched to branch main.\nDeleted branch feature (was %s).", featureSHA[:7]))
+	if f.localBranchExists("feature") {
+		t.Error("local branch feature still exists")
+	}
+	if f.currentBranch() != "main" {
+		t.Errorf("current branch = %q, want main", f.currentBranch())
+	}
+	if got := f.localGit("rev-parse", "--abbrev-ref", "main@{upstream}"); got != "origin/main" {
+		t.Errorf("main tracks %q, want origin/main", got)
+	}
+}
+
 func TestRunKeepsUnmergedGoneBranch(t *testing.T) {
 	f := newSyncFixture(t)
 	f.pushUpstreamBranch("feature", "feature-1")
@@ -1002,6 +1037,133 @@ func TestRunRejectsPositionalArguments(t *testing.T) {
 				t.Errorf("local merged = %s, want unchanged %s", got, mergedBefore)
 			}
 		})
+	}
+}
+
+func TestRunRemoteFlag(t *testing.T) {
+	f := newSyncFixture(t)
+	// A second remote "fork" (a copy of remote.git) where feature moves on.
+	// It ranks below origin, so only --remote=fork selects it.
+	fork := filepath.Join(t.TempDir(), "fork.git")
+	f.gitIn(f.upstream, "clone", "--quiet", "--bare", f.remote, fork)
+	f.upstreamGit("remote", "add", "fork", fork)
+	f.pushUpstreamBranch("feature", "feature-1")
+	f.upstreamGit("push", "--quiet", "fork", "main", "feature")
+	f.localGit("remote", "add", "fork", fork)
+	f.localGit("fetch", "--quiet", "fork")
+	// Without upstream config, feature is matched by name against the main
+	// remote. (A branch tracking fork would be synced against fork/feature
+	// whichever remote is the main one.)
+	f.localGit("branch", "--quiet", "--no-track", "feature", "fork/feature")
+	before := f.sha(f.local, "feature")
+	f.upstreamGit("checkout", "--quiet", "feature")
+	f.commit(f.upstream, "feature-2")
+	f.upstreamGit("push", "--quiet", "fork", "feature")
+	f.upstreamGit("checkout", "--quiet", "main")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	f.assertBranchAt("feature", before)
+
+	res = f.sync("--remote=fork")
+	if res.err != nil {
+		t.Fatalf("run(--remote=fork) error: %v", res.err)
+	}
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch feature (was %s).", before[:7]))
+	f.assertBranchAt("feature", f.sha(f.upstream, "feature"))
+}
+
+func TestRunRemoteFlagUnknownRemote(t *testing.T) {
+	f := newSyncFixture(t)
+	before := f.sha(f.local, "main")
+	f.advanceUpstream("main", "upstream-1")
+
+	res := f.sync("--remote=nope")
+	if res.err == nil {
+		t.Fatal("run() succeeded, want an error for an unknown remote")
+	}
+	assertContains(t, "stderr", res.stderr, "fatal: no such remote 'nope'")
+	f.assertBranchAt("main", before)
+}
+
+// TestRunExclude checks that branches matching an exclude pattern, from
+// --exclude or gh-sync.exclude, are neither updated nor deleted, while other
+// branches still are.
+func TestRunExclude(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config []string
+		flags  []string
+	}{
+		{name: "flag", flags: []string{"--exclude=wip/*", "--exclude=keep"}},
+		{name: "config", config: []string{"wip/*", "keep"}},
+		{name: "config and flag", config: []string{"wip/*"}, flags: []string{"--exclude=keep"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			// wip/a would be fast-forwarded, keep would be deleted (merged
+			// and gone), and other would be fast-forwarded.
+			for _, b := range []string{"wip/a", "keep", "other"} {
+				f.pushUpstreamBranch(b, b+"-1")
+				f.trackRemoteBranch(b)
+			}
+			wipBefore := f.sha(f.local, "wip/a")
+			keepBefore := f.sha(f.local, "keep")
+			otherBefore := f.sha(f.local, "other")
+			f.advanceUpstream("wip/a", "wip-2")
+			f.advanceUpstream("other", "other-2")
+			f.upstreamGit("merge", "--quiet", "--no-edit", "keep")
+			f.upstreamGit("push", "--quiet", "origin", "main")
+			f.deleteRemoteBranch("keep")
+			for _, p := range tc.config {
+				f.localGit("config", "--add", "gh-sync.exclude", p)
+			}
+
+			res := f.sync(append([]string{"--verbose"}, tc.flags...)...)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			f.assertBranchAt("wip/a", wipBefore)
+			f.assertBranchAt("keep", keepBefore)
+			assertContains(t, "stderr", res.stderr, "note: skipping 'wip/a' (excluded by 'wip/*')")
+			assertContains(t, "stderr", res.stderr, "note: skipping 'keep' (excluded by 'keep')")
+			assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch other (was %s).", otherBefore[:7]))
+		})
+	}
+}
+
+func TestRunExcludeInvalidPattern(t *testing.T) {
+	f := newSyncFixture(t)
+	before := f.sha(f.local, "main")
+	f.advanceUpstream("main", "upstream-1")
+
+	res := f.sync("--exclude=[")
+	if res.err == nil {
+		t.Fatal("run() succeeded, want an error for an invalid pattern")
+	}
+	assertContains(t, "stderr", res.stderr, `fatal: invalid exclude pattern "["`)
+	f.assertBranchAt("main", before)
+}
+
+func TestMatchExclude(t *testing.T) {
+	patterns := []string{"wip/*", "tmp-?"}
+	for _, tc := range []struct {
+		branch string
+		want   string
+	}{
+		{"wip/foo", "wip/*"},
+		{"wip/foo/bar", ""},
+		{"wip", ""},
+		{"tmp-1", "tmp-?"},
+		{"tmp-12", ""},
+		{"main", ""},
+	} {
+		got, ok := matchExclude(patterns, tc.branch)
+		if got != tc.want || ok != (tc.want != "") {
+			t.Errorf("matchExclude(%q) = %q, %v; want %q", tc.branch, got, ok, tc.want)
+		}
 	}
 }
 

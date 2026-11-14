@@ -46,9 +46,9 @@ gh sync
 
 ### 動作
 
-1. **main remote を決めます。** `upstream`、`github`、`origin` の順に探して最初に見つかったものを使い、どれも無ければ git が最初に列挙する remote を使います。通常の clone では `origin` です。fork に `upstream` を追加している場合は、代わりに親リポジトリと同期します。
+1. **main remote を決めます。** `--remote` で指定した remote を使います。指定が無ければ `upstream`、`github`、`origin` の順に探して最初に見つかったものを使い、どれも無ければ git が最初に列挙する remote を使います。通常の clone では `origin` です。fork に `upstream` を追加している場合は、代わりに親リポジトリと同期します。
 2. `git fetch --prune` で **その remote を fetch します。** ローカルブランチが追跡しているほかの remote(main remote が `upstream` のときの fork の `origin` など)も一緒に fetch します。stderr が端末のときは、fetch の進捗がそこに表示されます。ほかの remote の fetch に失敗した場合は警告(`warning: couldn't fetch <remote>; skipping the branches that track it: ...`)を出し、その remote を追跡するブランチをスキップして、終了ステータスを `1` にします。
-3. **すべてのローカルブランチを順に調べ**、対応するブランチと比較します。main remote か、fetch したほかの remote を追跡していれば設定済みの upstream と、そうでなければ main remote 上の同名のブランチと比較します。マージ済みかどうかは、常に main remote のデフォルトブランチに対して判定します。
+3. [除外パターン](#ブランチの除外)に一致するものを除いて **すべてのローカルブランチを順に調べ**、対応するブランチと比較します。main remote か、fetch したほかの remote を追跡していれば設定済みの upstream と、そうでなければ main remote 上の同名のブランチと比較します。マージ済みかどうかは、常に main remote のデフォルトブランチに対して判定します。
 
 | ローカルブランチの状態 | 動作 |
 | --- | --- |
@@ -68,7 +68,7 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 - merge、rebase、強制更新、push は一切しません。ローカルにしか無いコミットを持つブランチは必ずそのまま残ります。
 - ブランチを削除するのは、remote(main remote や fork など)のブランチを追跡していて、git がそのブランチの remote-tracking ref を prune しており(`%(upstream:track)` が `[gone]`)、かつリモートのデフォルトブランチに無いコミットを持たないか、デフォルトブランチにマージ済みの pull request の head コミットがローカルブランチの先頭と完全に一致する場合だけです。upstream を一度も設定していないブランチは削除しません。
 - こうしたブランチは、ほかのブランチの処理が終わったあとに、main remote のリポジトリに対する `gh api graphql` のリクエスト(50 本ごとに 1 回)でまとめて確認します。そのため、これらのメッセージは最後に出力されます。確認できない場合(`gh` が未認証、GitHub 以外の remote、API エラー、30 秒以内に応答が無い)は「appears not merged」の警告を出してブランチを残します。理由は `--verbose` で表示されます。pull request のマージ後にコミットを追加したブランチも残します。
-- 削除対象のブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替え、`Switched to branch ...` と表示します。
+- 削除対象のブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替え、`Switched to branch ...` と表示します。ローカルにデフォルトブランチが無い場合は、main remote のデフォルトブランチを追跡するブランチとして作成します。
 - 別の worktree でチェックアウトされているブランチは動かしません。
 
 知っておくとよい点:
@@ -82,10 +82,26 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 | `--verbose` | 変更を伴う git コマンドと、マージ済み pull request を検索する `gh` コマンドを、`$ git ...` / `$ gh ...` の形式で stderr に表示する(hub の `HUB_VERBOSE=1` 相当) |
 | `--dry-run` | 更新・削除されるブランチを表示する(`Would update branch ...`、`Would delete branch ...`。チェックアウト中のブランチが削除される場合は、その前に `Would switch to branch ...`)だけで、ローカルブランチは変更しない。fetch は実行する |
 | `--color=WHEN` | 出力に色を付ける: `auto`(デフォルト)、`always`、`never` |
+| `--remote=NAME` | main remote を自動で選ばず、`NAME` を使う。その名前の remote が無ければエラーになる |
+| `--exclude=GLOB` | `GLOB` に一致するローカルブランチには触れない(更新も削除もしない)。複数回指定できる。[ブランチの除外](#ブランチの除外)を参照 |
 | `--version` | gh-sync のバージョンを表示して終了する |
 | `--help` | 使い方を stdout に表示する |
 
 gh-sync は位置引数を取りません。`gh sync dry-run`(`--` の付け忘れ)や `gh sync foo --dry-run` のようにオプション以外の引数を渡すと、`fatal: unexpected argument: ...` と使い方を表示してエラーになり、同期は行いません。
+
+### ブランチの除外
+
+除外パターンに一致するブランチは完全にスキップされ、fast-forward も削除もされません。パターンは次の 2 か所から読み込まれ、すべてが適用されます。
+
+- git config の `gh-sync.exclude`(複数の値を持てます)
+  ```sh
+  git config --add gh-sync.exclude 'wip/*'
+  git config --add gh-sync.exclude 'experiment'
+  ```
+  `--global` を付けるとすべてのリポジトリに適用されます。
+- コマンドラインの `--exclude=GLOB`(複数回指定可: `gh sync --exclude='wip/*' --exclude=tmp`)
+
+パターンはローカルブランチ名全体に対して Go の [`path.Match`](https://pkg.go.dev/path#Match) で照合します。`*` と `?` は `/` に一致しないため、`wip/*` は `wip/foo` には一致しますが `wip/foo/bar` には一致しません(その場合は `wip/*/*` も追加してください)。`[` のような不正なパターンがあると、fetch の前に `fatal: invalid exclude pattern ...` で終了します。`--verbose` を付けると、スキップしたブランチごとに `note: skipping '<name>' (excluded by '<pattern>')` を表示します。
 
 ### 色
 
@@ -128,7 +144,7 @@ git branch --set-upstream-to=<remote>/<branch> <name>
 ```
 
 **意図しない remote が使われる**
-優先順位は `upstream`、`github`、`origin` で固定です。これに合わせて remote の名前を変更してください(`git remote rename <old> upstream`)。
+`--remote` を指定しない場合の優先順位は `upstream`、`github`、`origin` です。使う remote を `--remote` で指定するか(`gh sync --remote=fork`)、これに合わせて remote の名前を変更してください(`git remote rename <old> upstream`)。
 
 バグを報告するときは、`gh sync --version` と `gh sync --verbose` の出力を添えてください。
 
