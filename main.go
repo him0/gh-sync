@@ -210,7 +210,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		return err
 	}
 
-	branches, err := getLocalBranches()
+	refs, err := readRefs(remote.Name)
 	if err != nil {
 		printError(cfg.stderrColors, "Failed to get local branches: %s", err.Error())
 		return err
@@ -220,8 +220,8 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 
 	hadFailure := false
 	var candidates []squashCandidate
-	for _, branch := range branches {
-		if perr := processBranch(cfg, branch, remote, branchToRemote, &currentBranch, defaultBranch, fullDefaultBranch, &candidates); perr != nil {
+	for _, branch := range refs.branches {
+		if perr := processBranch(cfg, branch, refs.remoteRefs, remote, branchToRemote, &currentBranch, defaultBranch, fullDefaultBranch, &candidates); perr != nil {
 			hadFailure = true
 		}
 	}
@@ -449,26 +449,125 @@ func getBranchToRemoteMapping() (map[string]string, error) {
 	return branchToRemote, nil
 }
 
-// getLocalBranches lists the names of local branches. It uses for-each-ref
-// with lstrip=2 rather than `git branch --format=%(refname:short)`, which
-// prints "heads/<name>" when a tag has the same name and includes a
-// "(HEAD detached at ...)" line when HEAD is detached.
-func getLocalBranches() ([]string, error) {
-	output, err := gitOutput("for-each-ref", "--format=%(refname:lstrip=2)", "refs/heads/")
-	if err != nil {
-		return nil, err
-	}
+// localBranch is a local branch as read by readRefs.
+type localBranch struct {
+	name string
+	// tip is the commit the branch points at.
+	tip string
+	// upstream is the remote-tracking ref the branch tracks, or "" when git
+	// cannot resolve one (no upstream config, a broken one, or an upstream
+	// outside the remote's fetch refspec).
+	upstream string
+	// gone reports that upstream is set but the remote-tracking ref does not
+	// exist (it was pruned).
+	gone bool
+	// ahead and behind count the commits only in the branch and only in
+	// upstream. Both are 0 when upstream is "" or gone.
+	ahead, behind int
+}
 
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	var branches []string
-	for _, line := range lines {
-		branch := strings.TrimSpace(line)
-		if branch != "" {
-			branches = append(branches, branch)
+// refSnapshot is the state of the local branches and the main remote's
+// remote-tracking refs, read with one git call.
+type refSnapshot struct {
+	branches []localBranch
+	// remoteRefs holds the full names of the refs under refs/remotes/<remote>/.
+	remoteRefs map[string]bool
+}
+
+// refFormat is the for-each-ref format readRefs parses: NUL-separated fields,
+// one ref per line. Ref names cannot contain NUL or newline.
+const refFormat = "%(refname)%00%(objectname)%00%(upstream)%00%(upstream:track)"
+
+// readRefs reads every local branch with its tip, upstream and ahead/behind
+// counts, and the remote-tracking refs of remote, with a single for-each-ref,
+// instead of a few git calls per branch.
+//
+// It reads full ref names rather than `git branch --format=%(refname:short)`,
+// which prints "heads/<name>" when a tag has the same name and includes a
+// "(HEAD detached at ...)" line when HEAD is detached.
+func readRefs(remote string) (refSnapshot, error) {
+	cmd := exec.Command("git", "for-each-ref", "--format="+refFormat, "refs/heads/", "refs/remotes/"+remote+"/")
+	// %(upstream:track) is translated; the C locale keeps it parseable.
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return refSnapshot{}, fmt.Errorf("%w: %s", err, msg)
+		}
+		return refSnapshot{}, err
+	}
+	return parseRefs(string(output), remote)
+}
+
+// parseRefs parses the output of for-each-ref with refFormat.
+func parseRefs(output, remote string) (refSnapshot, error) {
+	snap := refSnapshot{remoteRefs: make(map[string]bool)}
+	remotePrefix := "refs/remotes/" + remote + "/"
+	for line := range strings.SplitSeq(output, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\x00")
+		if len(fields) != 4 {
+			return refSnapshot{}, fmt.Errorf("unexpected for-each-ref output: %q", line)
+		}
+		refname := fields[0]
+		if strings.HasPrefix(refname, remotePrefix) {
+			snap.remoteRefs[refname] = true
+			continue
+		}
+		name, ok := strings.CutPrefix(refname, "refs/heads/")
+		if !ok || name == "" {
+			continue
+		}
+		b := localBranch{name: name, tip: fields[1], upstream: fields[2]}
+		if b.upstream != "" {
+			var err error
+			b.ahead, b.behind, b.gone, err = parseTrack(fields[3])
+			if err != nil {
+				return refSnapshot{}, fmt.Errorf("branch '%s': %w", name, err)
+			}
+		}
+		snap.branches = append(snap.branches, b)
+	}
+	return snap, nil
+}
+
+// parseTrack parses %(upstream:track) in the C locale: "" (in sync),
+// "[gone]", "[ahead N]", "[behind M]" or "[ahead N, behind M]".
+func parseTrack(track string) (ahead, behind int, gone bool, err error) {
+	if track == "" {
+		return 0, 0, false, nil
+	}
+	inner, ok := strings.CutPrefix(track, "[")
+	if ok {
+		inner, ok = strings.CutSuffix(inner, "]")
+	}
+	if !ok {
+		return 0, 0, false, fmt.Errorf("unexpected upstream track %q", track)
+	}
+	if inner == "gone" {
+		return 0, 0, true, nil
+	}
+	for part := range strings.SplitSeq(inner, ", ") {
+		key, num, found := strings.Cut(part, " ")
+		n, convErr := strconv.Atoi(num)
+		if !found || convErr != nil || n < 0 {
+			return 0, 0, false, fmt.Errorf("unexpected upstream track %q", track)
+		}
+		switch key {
+		case "ahead":
+			ahead = n
+		case "behind":
+			behind = n
+		default:
+			return 0, 0, false, fmt.Errorf("unexpected upstream track %q", track)
 		}
 	}
-
-	return branches, nil
+	return ahead, behind, false, nil
 }
 
 // processBranch synchronizes a single local branch against the main remote.
@@ -480,54 +579,59 @@ func getLocalBranches() ([]string, error) {
 //
 // A gone branch whose commits are not in the default branch is appended to
 // candidates instead; run() decides on those after a pull request lookup.
-func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote map[string]string, currentBranch *string, defaultBranch, fullDefaultBranch string, candidates *[]squashCandidate) error {
+func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, remote *Remote, branchToRemote map[string]string, currentBranch *string, defaultBranch, fullDefaultBranch string, candidates *[]squashCandidate) error {
+	branch := b.name
 	fullBranch := fmt.Sprintf("refs/heads/%s", branch)
-	remoteBranch := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, branch)
+	sameName := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, branch)
+	remoteBranch := ""
 	gone := false
+	// ahead and behind are known from for-each-ref when comparing against the
+	// upstream; a branch matched by name is compared with rev-list below.
+	counted := false
+	var ahead, behind int
 
 	if branchToRemote[branch] == remote.Name {
-		cmd := exec.Command("git", "rev-parse", "--symbolic-full-name", fmt.Sprintf("%s@{upstream}", branch))
-		output, err := cmd.Output()
-		if err == nil {
-			remoteBranch = strings.TrimSpace(string(output))
+		if b.upstream != "" && !b.gone {
+			remoteBranch = b.upstream
+			ahead, behind, counted = b.ahead, b.behind, true
 		} else {
-			// rev-parse @{upstream} can fail for two distinct reasons:
+			// The upstream can't be resolved for two distinct reasons:
 			//   (a) the remote tracking ref was pruned (truly gone), or
 			//   (b) branch.<name>.merge is missing/malformed (misconfig).
 			// Treat the branch as gone only when (a) is the case — otherwise
 			// the deletion path below would force-delete a branch over a
 			// config typo.
-			candidate := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, branch)
-			if hasRemoteBranch(candidate) {
+			if remoteRefs[sameName] {
 				printWarning(cfg.stderrColors, "'%s' upstream config is broken; skipping", branch)
 				return nil
 			}
-			remoteBranch = ""
 			gone = true
 		}
-	} else if branchToRemote[branch] == "" && hasRemoteBranch(remoteBranch) {
-		// No upstream config, but a same-named ref exists on the main remote.
-		// Fast-forward by name match (mirrors hub sync), but emit a hint so
-		// the user knows two unrelated branches with the same name are being
-		// treated as related.
-		if cfg.verbose {
+	} else if remoteRefs[sameName] {
+		remoteBranch = sameName
+		if branchToRemote[branch] == "" && cfg.verbose {
+			// No upstream config, but a same-named ref exists on the main
+			// remote. Fast-forward by name match (mirrors hub sync), but emit
+			// a hint so the user knows two unrelated branches with the same
+			// name are being treated as related.
 			fmt.Fprintf(os.Stderr, "note: '%s' has no upstream config; matching by name against %s/%s\n", branch, remote.Name, branch)
 		}
-	} else if !hasRemoteBranch(remoteBranch) {
-		remoteBranch = ""
 	}
 
 	if remoteBranch != "" {
-		ahead, behind, err := getCommitDifference(fullBranch, remoteBranch)
-		if err != nil {
-			printWarning(cfg.stderrColors, "couldn't compare '%s' against '%s': %s", branch, remoteBranch, err.Error())
-			return err
+		if !counted {
+			var err error
+			ahead, behind, err = getCommitDifference(fullBranch, remoteBranch)
+			if err != nil {
+				printWarning(cfg.stderrColors, "couldn't compare '%s' against '%s': %s", branch, remoteBranch, err.Error())
+				return err
+			}
 		}
 		switch {
 		case ahead == 0 && behind == 0:
 			return nil
 		case ahead == 0 && behind > 0:
-			oldCommit := getCommitSHA(fullBranch)
+			oldCommit := b.tip
 			if cfg.dryRun {
 				fmt.Printf("%sWould update branch %s%s%s (was %s).\n", cfg.stdoutColors.green, cfg.stdoutColors.lightGreen, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
 				return nil
@@ -561,14 +665,13 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 		printWarning(cfg.stderrColors, "couldn't compare '%s' against '%s': %s", branch, fullDefaultBranch, err.Error())
 		return err
 	}
-	oldCommit := getCommitSHA(fullBranch)
 	if ahead != 0 {
 		// The commits are not in the default branch, which is also the case
 		// after a squash or rebase merge.
-		*candidates = append(*candidates, squashCandidate{branch: branch, tip: oldCommit})
+		*candidates = append(*candidates, squashCandidate{branch: branch, tip: b.tip})
 		return nil
 	}
-	return deleteBranch(cfg, branch, oldCommit, "", currentBranch, defaultBranch)
+	return deleteBranch(cfg, branch, b.tip, "", currentBranch, defaultBranch)
 }
 
 // deleteBranch deletes branch, checking out defaultBranch first when branch
@@ -857,18 +960,6 @@ func getCommitDifference(branch1, branch2 string) (ahead, behind int, err error)
 	}
 
 	return ahead, behind, nil
-}
-
-// getCommitSHA returns the full SHA for ref, or an empty string if rev-parse
-// fails. Callers use shortSHA to format the result for display so a missing
-// SHA is rendered as "unknown" without risking a slice-out-of-range panic.
-func getCommitSHA(ref string) string {
-	cmd := exec.Command("git", "rev-parse", ref)
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(output))
 }
 
 // shortSHA renders a SHA prefix safely, returning "unknown" when sha is empty
