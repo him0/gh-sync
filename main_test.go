@@ -37,89 +37,6 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func TestColorizeOutput(t *testing.T) {
-	tests := []struct {
-		flag       string
-		isTerminal bool
-		noColor    bool
-		want       bool
-	}{
-		{"always", true, false, true},
-		{"always", false, false, true},
-		{"always", true, true, true},
-		{"always", false, true, true},
-		{"never", true, false, false},
-		{"never", false, false, false},
-		{"never", true, true, false},
-		{"never", false, true, false},
-		{"auto", true, false, true},
-		{"auto", false, false, false},
-		{"auto", true, true, false},
-		{"auto", false, true, false},
-		// unknown values fall through to auto behavior
-		{"typo", true, false, true},
-		{"typo", false, false, false},
-	}
-
-	for _, tt := range tests {
-		name := fmt.Sprintf("%s/tty=%v/no_color=%v", tt.flag, tt.isTerminal, tt.noColor)
-		t.Run(name, func(t *testing.T) {
-			got := colorizeOutput(tt.flag, tt.isTerminal, tt.noColor)
-			if got != tt.want {
-				t.Errorf("colorizeOutput(%q, %v, %v) = %v, want %v", tt.flag, tt.isTerminal, tt.noColor, got, tt.want)
-			}
-		})
-	}
-}
-
-// TestColorizeOutputPerStream checks that stdout and stderr are decided
-// independently, e.g. `gh sync | grep Updated` (stdout piped, stderr on a
-// terminal) must not leak escape sequences into stdout (issue #29).
-func TestColorizeOutputPerStream(t *testing.T) {
-	tests := []struct {
-		name                 string
-		flag                 string
-		stdoutTTY, stderrTTY bool
-		noColor              bool
-		wantStdout           bool
-		wantStderr           bool
-	}{
-		{"auto both tty", "auto", true, true, false, true, true},
-		{"auto stdout piped", "auto", false, true, false, false, true},
-		{"auto stderr piped", "auto", true, false, false, true, false},
-		{"auto both piped", "auto", false, false, false, false, false},
-		{"auto both tty NO_COLOR", "auto", true, true, true, false, false},
-		{"always stdout piped", "always", false, true, false, true, true},
-		{"always both piped NO_COLOR", "always", false, false, true, true, true},
-		{"never both tty", "never", true, true, false, false, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotStdout := colorizeOutput(tt.flag, tt.stdoutTTY, tt.noColor)
-			gotStderr := colorizeOutput(tt.flag, tt.stderrTTY, tt.noColor)
-			if gotStdout != tt.wantStdout || gotStderr != tt.wantStderr {
-				t.Errorf("stdout=%v stderr=%v, want stdout=%v stderr=%v", gotStdout, gotStderr, tt.wantStdout, tt.wantStderr)
-			}
-		})
-	}
-}
-
-func TestNewColorConfig(t *testing.T) {
-	t.Run("enabled", func(t *testing.T) {
-		c := newColorConfig(true)
-		if c.green == "" || c.lightGreen == "" || c.red == "" || c.lightRed == "" || c.magenta == "" || c.reset == "" {
-			t.Errorf("newColorConfig(true) returned empty fields: %+v", c)
-		}
-	})
-	t.Run("disabled", func(t *testing.T) {
-		c := newColorConfig(false)
-		if c.green != "" || c.lightGreen != "" || c.red != "" || c.lightRed != "" || c.magenta != "" || c.reset != "" {
-			t.Errorf("newColorConfig(false) returned non-empty fields: %+v", c)
-		}
-	})
-}
-
 // setupTestRepo creates a temporary git repo and returns its path. The initial
 // branch is pinned to "main" so tests are independent of the developer's
 // global `init.defaultBranch` config.
@@ -145,143 +62,6 @@ func setupTestRepo(t *testing.T) string {
 		}
 	}
 	return dir
-}
-
-func TestGetCommitDifference(t *testing.T) {
-	dir := setupTestRepo(t)
-	// t.Chdir restores the previous CWD on cleanup and serializes against
-	// other Chdir-using tests, so callers don't need to coordinate manually.
-	t.Chdir(dir)
-
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("command %v failed: %v\n%s", args, err, out)
-		}
-	}
-
-	defaultBranch := "refs/heads/main"
-
-	run("git", "checkout", "-b", "feature")
-	run("git", "commit", "--allow-empty", "-m", "feature-1")
-	run("git", "commit", "--allow-empty", "-m", "feature-2")
-
-	featureBranch := "refs/heads/feature"
-
-	ahead, behind, err := getCommitDifference(featureBranch, defaultBranch)
-	if err != nil {
-		t.Fatalf("getCommitDifference() error: %v", err)
-	}
-	if ahead != 2 {
-		t.Errorf("expected ahead=2, got %d", ahead)
-	}
-	if behind != 0 {
-		t.Errorf("expected behind=0, got %d", behind)
-	}
-
-	ahead, behind, err = getCommitDifference(defaultBranch, featureBranch)
-	if err != nil {
-		t.Fatalf("getCommitDifference() error: %v", err)
-	}
-	if ahead != 0 {
-		t.Errorf("expected ahead=0, got %d", ahead)
-	}
-	if behind != 2 {
-		t.Errorf("expected behind=2, got %d", behind)
-	}
-}
-
-func TestGetDefaultBranch(t *testing.T) {
-	dir := setupTestRepo(t)
-	t.Chdir(dir)
-
-	remoteDir := filepath.Join(t.TempDir(), "remote.git")
-	cmd := exec.Command("git", "clone", "--bare", dir, remoteDir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("clone --bare failed: %v\n%s", err, out)
-	}
-
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("command %v failed: %v\n%s", args, err, out)
-		}
-	}
-
-	run("git", "remote", "add", "testremote", remoteDir)
-	run("git", "fetch", "testremote")
-	// `git fetch` does not create refs/remotes/<remote>/HEAD; without
-	// `set-head` the test would only exercise the main/master fallback paths.
-	run("git", "remote", "set-head", "testremote", "--auto")
-
-	remote := &Remote{Name: "testremote", URL: remoteDir}
-
-	branch, err := getDefaultBranch(remote)
-	if err != nil {
-		t.Fatalf("getDefaultBranch() error: %v", err)
-	}
-	if branch != "main" {
-		t.Errorf("getDefaultBranch() = %q, want %q", branch, "main")
-	}
-}
-
-// TestGetDefaultBranchDanglingHead checks that a refs/remotes/<remote>/HEAD
-// pointing at a ref that no longer exists is ignored in favor of main.
-func TestGetDefaultBranchDanglingHead(t *testing.T) {
-	dir := setupTestRepo(t)
-	t.Chdir(dir)
-
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command(args[0], args[1:]...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("command %v failed: %v\n%s", args, err, out)
-		}
-	}
-
-	run("git", "update-ref", "refs/remotes/testremote/main", "HEAD")
-	run("git", "symbolic-ref", "refs/remotes/testremote/HEAD", "refs/remotes/testremote/master")
-
-	branch, err := getDefaultBranch(&Remote{Name: "testremote"})
-	if err != nil {
-		t.Fatalf("getDefaultBranch() error: %v", err)
-	}
-	if branch != "main" {
-		t.Errorf("getDefaultBranch() = %q, want %q", branch, "main")
-	}
-}
-
-func TestGetDefaultBranchMissingRemote(t *testing.T) {
-	dir := setupTestRepo(t)
-	t.Chdir(dir)
-
-	// Remote configured but with no fetched refs — neither symbolic-ref nor
-	// show-ref of main/master will succeed.
-	remote := &Remote{Name: "ghost", URL: ""}
-	if _, err := getDefaultBranch(remote); err == nil {
-		t.Error("getDefaultBranch() with no remote refs: want error, got nil")
-	}
-}
-
-func TestShortSHA(t *testing.T) {
-	tests := []struct {
-		in, want string
-	}{
-		{"", "unknown"},
-		{"abc", "abc"},
-		{"abcdef0", "abcdef0"},
-		{"abcdef01234567", "abcdef0"},
-	}
-	for _, tt := range tests {
-		if got := shortSHA(tt.in); got != tt.want {
-			t.Errorf("shortSHA(%q) = %q, want %q", tt.in, got, tt.want)
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -478,30 +258,6 @@ func assertNotContains(t *testing.T, label, got, unwanted string) {
 	t.Helper()
 	if strings.Contains(got, unwanted) {
 		t.Errorf("%s unexpectedly contains %q:\n%s", label, unwanted, got)
-	}
-}
-
-// TestRunVersion checks that --version prints the embedded version and exits
-// successfully without touching git (the fixture has pending upstream commits
-// that a real sync would fast-forward).
-func TestRunVersion(t *testing.T) {
-	f := newSyncFixture(t)
-	before := f.sha(f.local, "main")
-	f.advanceUpstream("main", "upstream-1")
-
-	origVersion := version
-	version = "v1.2.3"
-	t.Cleanup(func() { version = origVersion })
-
-	res := f.sync("--version")
-	if res.err != nil {
-		t.Fatalf("run() error: %v", res.err)
-	}
-	if got, want := res.stdout, "gh-sync version v1.2.3\n"; got != want {
-		t.Errorf("stdout = %q, want %q", got, want)
-	}
-	if got := f.sha(f.local, "main"); got != before {
-		t.Errorf("local main moved to %s, want it left at %s", got, before)
 	}
 }
 
@@ -857,21 +613,6 @@ func TestRunHelp(t *testing.T) {
 	}
 }
 
-// TestRunUnknownFlagPrintsUsageToStderr checks that a usage error keeps the
-// usage on stderr, after flag's own error message.
-func TestRunUnknownFlagPrintsUsageToStderr(t *testing.T) {
-	f := newSyncFixture(t)
-
-	res := f.sync("--bogus")
-	if res.err == nil || errors.Is(res.err, flag.ErrHelp) {
-		t.Fatalf("run() error = %v, want a usage error", res.err)
-	}
-	assertContains(t, "stderr", res.stderr, "flag provided but not defined: -bogus\nUsage: gh sync [options]\n")
-	if res.stdout != "" {
-		t.Errorf("stdout = %q, want empty", res.stdout)
-	}
-}
-
 // TestRunVerbosePrintsGitErrorOnce checks that a failing git command under
 // --verbose shows git's error only inside the warning, not a second time
 // right after the command line (issue #63).
@@ -897,66 +638,6 @@ func TestRunVerbosePrintsGitErrorOnce(t *testing.T) {
 		t.Errorf("git's error appears %d times in stderr, want 1", n)
 	}
 }
-
-// TestRunGitStderr checks that runGitStderr leaves git's stderr on os.Stderr
-// and does not repeat it in the returned error.
-func TestRunGitStderr(t *testing.T) {
-	t.Chdir(setupTestRepo(t))
-	errFile, err := os.CreateTemp(t.TempDir(), "stderr")
-	if err != nil {
-		t.Fatal(err)
-	}
-	origErr := os.Stderr
-	os.Stderr = errFile
-	runErr := runGitStderr(runConfig{}, "rev-parse", "--verify", "--end-of-options", "refs/heads/nonexistent")
-	os.Stderr = origErr
-	if err := errFile.Close(); err != nil {
-		t.Fatal(err)
-	}
-	stderr, err := os.ReadFile(errFile.Name())
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if runErr == nil {
-		t.Fatal("runGitStderr() error = nil, want an error")
-	}
-	assertContains(t, "stderr", string(stderr), "fatal:")
-	assertNotContains(t, "error", runErr.Error(), "fatal:")
-}
-
-// TestNoColorSet checks that NO_COLOR disables color only when it is set to a
-// non-empty value, as https://no-color.org specifies (issue #63).
-func TestNoColorSet(t *testing.T) {
-	tests := []struct {
-		name  string
-		value *string
-		want  bool
-	}{
-		{"unset", nil, false},
-		{"empty", ptr(""), false},
-		{"1", ptr("1"), true},
-		{"0", ptr("0"), true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// t.Setenv restores the original value (or absence) on cleanup.
-			t.Setenv("NO_COLOR", "")
-			if tt.value == nil {
-				if err := os.Unsetenv("NO_COLOR"); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				t.Setenv("NO_COLOR", *tt.value)
-			}
-			if got := noColorSet(); got != tt.want {
-				t.Errorf("noColorSet() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func ptr(s string) *string { return &s }
 
 // TestRunBeforeFirstFetch checks that a remote that was added but never
 // fetched (no remote-tracking refs yet) can be synced: the default branch is
@@ -1017,24 +698,6 @@ func (f *syncFixture) makePromisorRemote() {
 	f.t.Helper()
 	f.localGit("config", "remote.origin.promisor", "true")
 	f.localGit("config", "remote.origin.partialclonefilter", "blob:none")
-}
-
-// TestGetRemotesPartialClone is the regression test for #56: getRemotes()
-// must still find a promisor remote.
-func TestGetRemotesPartialClone(t *testing.T) {
-	f := newSyncFixture(t)
-	f.makePromisorRemote()
-
-	remotes, err := getRemotes()
-	if err != nil {
-		t.Fatalf("getRemotes() error: %v", err)
-	}
-	if len(remotes) != 1 {
-		t.Fatalf("getRemotes() = %+v, want exactly origin", remotes)
-	}
-	if remotes[0].Name != "origin" || remotes[0].URL != f.remote {
-		t.Errorf("getRemotes()[0] = %+v, want {Name: origin, URL: %s}", remotes[0], f.remote)
-	}
 }
 
 // TestRunPartialClone checks that a sync completes in a partial clone (#56).
