@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -84,6 +85,10 @@ type syncFixture struct {
 	upstream string // non-bare repo that pushes to remote
 	remote   string // bare repo; the "origin" of local
 	local    string // repo gh-sync operates on (also the test's CWD)
+
+	// findMergedPRs is passed to run(). It defaults to a finder that always
+	// fails, so tests never call gh; tests of the pull request path replace it.
+	findMergedPRs mergedPRFinder
 }
 
 // newSyncFixture creates the fixture and chdirs into the local clone, so a
@@ -97,6 +102,9 @@ func newSyncFixture(t *testing.T) *syncFixture {
 		upstream: upstream,
 		remote:   filepath.Join(base, "remote.git"),
 		local:    filepath.Join(base, "local"),
+		findMergedPRs: func(runConfig, Remote, string, []string) (map[string][]mergedPR, error) {
+			return nil, errors.New("pull request lookup is not stubbed in this test")
+		},
 	}
 	f.gitIn(base, "clone", "--quiet", "--bare", upstream, f.remote)
 	f.gitIn(upstream, "remote", "add", "origin", f.remote)
@@ -225,7 +233,7 @@ func (f *syncFixture) sync(extraArgs ...string) syncResult {
 	}
 	origOut, origErr := os.Stdout, os.Stderr
 	os.Stdout, os.Stderr = outFile, errFile
-	runErr := run(args)
+	runErr := run(args, f.findMergedPRs)
 	os.Stdout, os.Stderr = origOut, origErr
 
 	read := func(file *os.File) string {
@@ -435,6 +443,298 @@ func TestRunKeepsUnmergedGoneBranch(t *testing.T) {
 	}
 	if got := f.sha(f.local, "feature"); got != featureSHA {
 		t.Errorf("local feature = %s, want unchanged %s", got, featureSHA)
+	}
+}
+
+// squashMergeAndDelete simulates GitHub's "Squash and merge" followed by
+// deleting the branch: a new commit lands on main, so the branch's own commits
+// never become reachable from the default branch.
+func (f *syncFixture) squashMergeAndDelete(branch string) {
+	f.t.Helper()
+	f.upstreamGit("checkout", "--quiet", "main")
+	f.commit(f.upstream, branch+" (squashed)")
+	f.upstreamGit("push", "--quiet", "origin", "main")
+	f.deleteRemoteBranch(branch)
+}
+
+// prLookup records the arguments a mergedPRFinder was called with.
+type prLookup struct {
+	remote string
+	base   string
+	heads  []string
+}
+
+// stubMergedPRs returns a finder that answers from prs (keyed by remote
+// branch name) and records every call in calls.
+func stubMergedPRs(prs map[string][]mergedPR, calls *[]prLookup) mergedPRFinder {
+	return func(_ runConfig, remote Remote, base string, heads []string) (map[string][]mergedPR, error) {
+		*calls = append(*calls, prLookup{remote: remote.Name, base: base, heads: slices.Clone(heads)})
+		found := make(map[string][]mergedPR)
+		for _, h := range heads {
+			found[h] = prs[h]
+		}
+		return found, nil
+	}
+}
+
+func TestRunDeletesSquashMergedBranch(t *testing.T) {
+	tests := []struct {
+		name       string
+		local      string // local branch name; it always tracks origin/feature
+		checkedOut bool
+		dryRun     bool
+	}{
+		{"not checked out", "feature", false, false},
+		{"checked out", "feature", true, false},
+		// The pull request must be looked up by the remote branch name.
+		{"local name differs", "topic", false, false},
+		{"dry run", "feature", true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushUpstreamBranch("feature", "feature-1")
+			f.localGit("fetch", "--quiet", "origin")
+			f.localGit("branch", "--quiet", "--track", tt.local, "origin/feature")
+			tip := f.sha(f.local, tt.local)
+			if tt.checkedOut {
+				f.localGit("checkout", "--quiet", tt.local)
+			}
+			f.squashMergeAndDelete("feature")
+
+			var calls []prLookup
+			// An older merged pull request from the same branch name does
+			// not match the tip and must be skipped.
+			f.findMergedPRs = stubMergedPRs(map[string][]mergedPR{
+				"feature": {{Number: 99, HeadRefOid: strings.Repeat("0", 40)}, {Number: 123, HeadRefOid: tip}},
+			}, &calls)
+			var args []string
+			if tt.dryRun {
+				args = append(args, "--dry-run")
+			}
+			res := f.sync(args...)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+
+			want := prLookup{remote: "origin", base: "main", heads: []string{"feature"}}
+			if len(calls) != 1 || !reflect.DeepEqual(calls[0], want) {
+				t.Errorf("findMergedPRs calls = %+v, want one call %+v", calls, want)
+			}
+			verb := "Deleted"
+			if tt.dryRun {
+				verb = "Would delete"
+			}
+			deleted := fmt.Sprintf("%s branch %s (was %s, merged via #123).", verb, tt.local, tip[:7])
+			switch {
+			case tt.dryRun:
+				assertContains(t, "stdout", res.stdout, "Would switch to branch main.\n"+deleted)
+			case tt.checkedOut:
+				assertContains(t, "stdout", res.stdout, "Switched to branch main.\n"+deleted)
+			default:
+				assertContains(t, "stdout", res.stdout, deleted)
+			}
+			assertNotContains(t, "stderr", res.stderr, "appears not merged")
+
+			if tt.dryRun {
+				f.assertBranchAt(tt.local, tip)
+				if f.currentBranch() != tt.local {
+					t.Errorf("current branch = %q, want %s", f.currentBranch(), tt.local)
+				}
+				return
+			}
+			if f.localBranchExists(tt.local) {
+				t.Errorf("local branch %s still exists", tt.local)
+			}
+			if f.currentBranch() != "main" {
+				t.Errorf("current branch = %q, want main", f.currentBranch())
+			}
+		})
+	}
+}
+
+// TestRunLooksUpSquashMergedBranchesTogether checks that all candidate
+// branches are looked up in a single call, with each remote branch name once,
+// and that only branches whose tip matches are deleted.
+func TestRunLooksUpSquashMergedBranchesTogether(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushUpstreamBranch("feature-a", "a-1")
+	f.pushUpstreamBranch("feature-b", "b-1")
+	f.pushUpstreamBranch("feature-c", "c-1")
+	f.trackRemoteBranch("feature-a")
+	f.trackRemoteBranch("feature-b")
+	f.trackRemoteBranch("feature-c")
+	f.localGit("branch", "--quiet", "--track", "copy-of-a", "origin/feature-a")
+	tipA := f.sha(f.local, "feature-a")
+	tipB := f.sha(f.local, "feature-b")
+	for _, b := range []string{"feature-a", "feature-b", "feature-c"} {
+		f.squashMergeAndDelete(b)
+	}
+
+	var calls []prLookup
+	f.findMergedPRs = stubMergedPRs(map[string][]mergedPR{
+		"feature-a": {{Number: 1, HeadRefOid: tipA}},
+		"feature-b": {{Number: 2, HeadRefOid: tipB}},
+	}, &calls)
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+
+	want := prLookup{remote: "origin", base: "main", heads: []string{"feature-a", "feature-b", "feature-c"}}
+	if len(calls) != 1 || !reflect.DeepEqual(calls[0], want) {
+		t.Errorf("findMergedPRs calls = %+v, want one call %+v", calls, want)
+	}
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch copy-of-a (was %s, merged via #1).", tipA[:7]))
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature-a (was %s, merged via #1).", tipA[:7]))
+	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature-b (was %s, merged via #2).", tipB[:7]))
+	assertContains(t, "stderr", res.stderr, "warning: 'feature-c' was deleted on origin, but appears not merged into 'main'")
+	// feature-c has no merged pull request and must be kept.
+	f.assertBranchAt("feature-c", f.sha(f.upstream, "feature-c"))
+}
+
+// TestRunKeepsSquashMergedBranchWithoutPR checks the fallback: when no merged
+// pull request matches the tip, or the lookup fails, the branch is kept with
+// the usual warning. The failure reason is shown only with --verbose.
+func TestRunKeepsSquashMergedBranchWithoutPR(t *testing.T) {
+	lookupErr := errors.New("gh: not logged in")
+	tests := []struct {
+		name     string
+		prs      []mergedPR // merged pull requests for "feature"
+		err      error
+		verbose  bool
+		wantNote bool
+	}{
+		{"no merged pull request", nil, nil, false, false},
+		// Commits were added after the pull request was merged.
+		{"head differs from tip", []mergedPR{{Number: 7, HeadRefOid: strings.Repeat("0", 40)}}, nil, false, false},
+		{"lookup failed", nil, lookupErr, false, false},
+		{"lookup failed, verbose", nil, lookupErr, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushUpstreamBranch("feature", "feature-1")
+			f.trackRemoteBranch("feature")
+			tip := f.sha(f.local, "feature")
+			f.squashMergeAndDelete("feature")
+			f.findMergedPRs = func(runConfig, Remote, string, []string) (map[string][]mergedPR, error) {
+				if tt.err != nil {
+					return nil, tt.err
+				}
+				return map[string][]mergedPR{"feature": tt.prs}, nil
+			}
+			var args []string
+			if tt.verbose {
+				args = append(args, "--verbose")
+			}
+
+			res := f.sync(args...)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			assertContains(t, "stderr", res.stderr, "warning: 'feature' was deleted on origin, but appears not merged into 'main'")
+			assertNotContains(t, "stdout", res.stdout, "Deleted branch feature")
+			if tt.wantNote {
+				assertContains(t, "stderr", res.stderr, "note: couldn't look up merged pull requests: gh: not logged in")
+			} else {
+				assertNotContains(t, "stderr", res.stderr, "note: couldn't look up")
+			}
+			f.assertBranchAt("feature", tip)
+		})
+	}
+}
+
+func TestBuildMergedPRQuery(t *testing.T) {
+	// Characters that would break or alter the query if interpolated.
+	heads := []string{"feature", `evil") { x } #`}
+	query, vars := buildMergedPRQuery(gitHubRepo{host: "github.com", owner: "him0", name: "gh-sync"}, "main", heads)
+
+	wantVars := []queryVar{
+		{"owner", "him0"}, {"name", "gh-sync"}, {"base", "main"},
+		{"h0", "feature"}, {"h1", `evil") { x } #`},
+	}
+	if !reflect.DeepEqual(vars, wantVars) {
+		t.Errorf("vars = %+v, want %+v", vars, wantVars)
+	}
+	for _, want := range []string{
+		"query($owner: String!, $name: String!, $base: String!, $h0: String!, $h1: String!) {",
+		"repository(owner: $owner, name: $name) {",
+		"b0: pullRequests(headRefName: $h0, baseRefName: $base, states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {",
+		"b1: pullRequests(headRefName: $h1, baseRefName: $base, states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {",
+		"nodes { number headRefOid }",
+	} {
+		assertContains(t, "query", query, want)
+	}
+	for _, leaked := range []string{"him0", "gh-sync", "evil", "feature"} {
+		assertNotContains(t, "query", query, leaked)
+	}
+}
+
+func TestParseMergedPRResponse(t *testing.T) {
+	heads := []string{"feature", "fix"}
+	got, err := parseMergedPRResponse([]byte(`{"data":{"repository":{
+		"b0":{"nodes":[{"number":12,"headRefOid":"aaaa"},{"number":3,"headRefOid":"bbbb"}]},
+		"b1":{"nodes":[]}}}}`), heads)
+	if err != nil {
+		t.Fatalf("parseMergedPRResponse() error: %v", err)
+	}
+	want := map[string][]mergedPR{
+		"feature": {{Number: 12, HeadRefOid: "aaaa"}, {Number: 3, HeadRefOid: "bbbb"}},
+		"fix":     {},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseMergedPRResponse() = %+v, want %+v", got, want)
+	}
+
+	for name, output := range map[string]string{
+		"repository not found": `{"data":{"repository":null}}`,
+		"missing alias":        `{"data":{"repository":{"b0":{"nodes":[]}}}}`,
+		"GraphQL error":        `{"data":null,"errors":[{"message":"Something went wrong"}]}`,
+		"not JSON":             `oops`,
+	} {
+		if _, err := parseMergedPRResponse([]byte(output), heads); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+}
+
+func TestParseGitHubURL(t *testing.T) {
+	tests := []struct {
+		url     string
+		want    gitHubRepo
+		wantErr bool
+	}{
+		{url: "https://github.com/him0/gh-sync.git", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "https://github.com/him0/gh-sync", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "https://github.com/him0/gh-sync/", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "https://user@ghe.example.com/org/repo.git", want: gitHubRepo{"ghe.example.com", "org", "repo"}},
+		{url: "git@github.com:him0/gh-sync.git", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "github.com:him0/gh-sync", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "ssh://git@github.com/him0/gh-sync.git", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "ssh://git@ghe.example.com:2222/org/repo.git", want: gitHubRepo{"ghe.example.com", "org", "repo"}},
+		{url: "/home/me/repos/gh-sync.git", wantErr: true},
+		{url: `C:\repos\gh-sync.git`, wantErr: true},
+		{url: "C:/repos/gh-sync.git", wantErr: true},
+		{url: "file:///home/me/repos/gh-sync.git", wantErr: true},
+		{url: "https://gitlab.example.com/group/sub/repo.git", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			got, err := parseGitHubURL(tt.url)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseGitHubURL(%q) = %+v, want error", tt.url, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseGitHubURL(%q) error: %v", tt.url, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseGitHubURL(%q) = %+v, want %+v", tt.url, got, tt.want)
+			}
+		})
 	}
 }
 
