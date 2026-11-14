@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -64,15 +65,26 @@ func newColorConfig(enabled bool) colorConfig {
 //
 // dryRun reports the updates and deletions processBranch would make without
 // making them. fetch still runs so the report reflects the remote's state.
+//
+// findMergedPR looks up merged pull requests for gone branches whose commits
+// are not in the default branch (squash or rebase merges). Tests stub it.
 type runConfig struct {
 	stdoutColors colorConfig
 	stderrColors colorConfig
 	verbose      bool
 	dryRun       bool
+	findMergedPR mergedPRFinder
 }
 
+// mergedPRFinder returns the number of a merged pull request into base's
+// repository whose head is headBranch on head's repository and whose head
+// commit is tip. It returns 0 when no such pull request exists, and an error
+// when that cannot be determined (gh missing or not authenticated, a remote
+// that is not on GitHub, an API error).
+type mergedPRFinder func(base, head Remote, headBranch, tip string) (int, error)
+
 func main() {
-	err := run(os.Args[1:])
+	err := run(os.Args[1:], findMergedPRWithGh)
 	if err == nil {
 		return
 	}
@@ -84,7 +96,7 @@ func main() {
 	os.Exit(1)
 }
 
-func run(args []string) error {
+func run(args []string, findMergedPR mergedPRFinder) error {
 	fs := flag.NewFlagSet("gh-sync", flag.ContinueOnError)
 	var (
 		verbose     bool
@@ -137,6 +149,7 @@ func run(args []string) error {
 		stderrColors: newColorConfig(colorizeOutput(colorFlag, stderrIsTerminal, noColor)),
 		verbose:      verbose,
 		dryRun:       dryRun,
+		findMergedPR: findMergedPR,
 	}
 
 	if err := checkGitRepo(); err != nil {
@@ -515,14 +528,22 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 		fmt.Fprintf(os.Stderr, "warning: couldn't compare '%s' against '%s': %s\n", branch, fullDefaultBranch, err.Error())
 		return err
 	}
+	oldCommit := getCommitSHA(fullBranch)
+	reason := ""
 	if ahead != 0 {
-		fmt.Fprintf(os.Stderr, "warning: '%s' was deleted on %s, but appears not merged into '%s'\n", branch, remote.Name, defaultBranch)
-		return nil
+		// The commits are not in the default branch, which is also the case
+		// after a squash or rebase merge. Delete only when a merged pull
+		// request's head commit is exactly the local tip.
+		pr := lookupMergedPR(cfg, branch, *remote, oldCommit)
+		if pr == 0 {
+			fmt.Fprintf(os.Stderr, "warning: '%s' was deleted on %s, but appears not merged into '%s'\n", branch, remote.Name, defaultBranch)
+			return nil
+		}
+		reason = fmt.Sprintf(", merged via #%d", pr)
 	}
 
-	// ahead == 0: every commit on this branch is already in the default
-	// branch, so it's safe to delete.
-	oldCommit := getCommitSHA(fullBranch)
+	// Every commit on this branch is in the default branch, or the branch
+	// tip was merged through a pull request, so it's safe to delete.
 	if branch == *currentBranch {
 		if cfg.dryRun {
 			fmt.Printf("Would switch to branch %s.\n", defaultBranch)
@@ -538,15 +559,147 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 		*currentBranch = defaultBranch
 	}
 	if cfg.dryRun {
-		fmt.Printf("%sWould delete branch %s%s%s (was %s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
+		fmt.Printf("%sWould delete branch %s%s%s (was %s%s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit), reason)
 		return nil
 	}
 	if err := runGitSilent(cfg, "branch", "-D", branch); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: couldn't delete '%s': %s\n", branch, err.Error())
 		return err
 	}
-	fmt.Printf("%sDeleted branch %s%s%s (was %s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
+	fmt.Printf("%sDeleted branch %s%s%s (was %s%s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit), reason)
 	return nil
+}
+
+// lookupMergedPR returns the number of the merged pull request whose head
+// commit is tip, for a branch that tracked a now-deleted branch on remote, or
+// 0 when there is none or it can't be determined. Lookup failures are only
+// reported with --verbose: the caller then keeps the branch and prints the
+// usual "appears not merged" warning.
+func lookupMergedPR(cfg runConfig, branch string, remote Remote, tip string) int {
+	note := func(err error) {
+		if cfg.verbose {
+			fmt.Fprintf(os.Stderr, "note: couldn't look up a merged pull request for '%s': %s\n", branch, err.Error())
+		}
+	}
+	if tip == "" {
+		note(errors.New("couldn't read the branch tip"))
+		return 0
+	}
+	// The upstream ref is gone, so @{upstream} can't be resolved; the branch
+	// name on the remote (which may differ from the local name) is still in
+	// branch.<name>.merge.
+	merge, err := gitOutput("config", "--get", "branch."+branch+".merge")
+	if err != nil {
+		note(err)
+		return 0
+	}
+	mergeRef := strings.TrimSpace(string(merge))
+	headBranch, ok := strings.CutPrefix(mergeRef, "refs/heads/")
+	if !ok || headBranch == "" {
+		note(fmt.Errorf("unexpected branch.%s.merge value %q", branch, mergeRef))
+		return 0
+	}
+	// Only branches that tracked the main remote reach this point, so the
+	// pull request's head and base repositories are both remote's.
+	pr, err := cfg.findMergedPR(remote, remote, headBranch, tip)
+	if err != nil {
+		note(err)
+		return 0
+	}
+	return pr
+}
+
+// findMergedPRWithGh implements mergedPRFinder with `gh api`. The head filter
+// is "<owner>:<branch>" so pull requests opened from forks are found too. A
+// pull request counts only when it was merged and its head commit equals tip,
+// so commits added after the merge keep the branch.
+func findMergedPRWithGh(base, head Remote, headBranch, tip string) (int, error) {
+	baseRepo, err := parseGitHubURL(base.URL)
+	if err != nil {
+		return 0, err
+	}
+	headRepo, err := parseGitHubURL(head.URL)
+	if err != nil {
+		return 0, err
+	}
+	if headRepo.host != baseRepo.host {
+		return 0, fmt.Errorf("remotes %s and %s are on different hosts", base.Name, head.Name)
+	}
+	cmd := exec.Command("gh", "api", "--hostname", baseRepo.host, "--method", "GET",
+		fmt.Sprintf("repos/%s/%s/pulls", baseRepo.owner, baseRepo.name),
+		"-f", "state=closed",
+		"-f", "head="+headRepo.owner+":"+headBranch,
+		"-f", "per_page=100",
+		"--jq", `.[] | select(.merged_at != null) | "\(.number) \(.head.sha)"`)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return 0, fmt.Errorf("gh api: %w: %s", err, msg)
+		}
+		return 0, fmt.Errorf("gh api: %w", err)
+	}
+	return matchMergedPR(output, tip)
+}
+
+// matchMergedPR picks the pull request whose head commit is tip from `gh api`
+// output lines of the form "<number> <head sha>", returning 0 when none
+// matches.
+func matchMergedPR(output []byte, tip string) (int, error) {
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		number, sha, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok || sha != tip {
+			continue
+		}
+		n, err := strconv.Atoi(number)
+		if err != nil {
+			return 0, fmt.Errorf("unexpected gh api output: %q", line)
+		}
+		return n, nil
+	}
+	return 0, nil
+}
+
+// gitHubRepo identifies a repository on a GitHub host (github.com or GitHub
+// Enterprise Server).
+type gitHubRepo struct {
+	host  string
+	owner string
+	name  string
+}
+
+// scpLikeURLRe matches scp-like git URLs such as git@github.com:owner/repo.git.
+var scpLikeURLRe = regexp.MustCompile(`^(?:[^@/]+@)?([^/:]+):(.+)$`)
+
+// parseGitHubURL extracts host, owner and repository name from a remote URL
+// in https, ssh, git or scp-like form. Local paths and URLs whose path is not
+// exactly "<owner>/<repo>" are rejected. Whether the host is actually a GitHub
+// host is left to gh, which fails for hosts it isn't authenticated to.
+func parseGitHubURL(raw string) (gitHubRepo, error) {
+	var host, path string
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return gitHubRepo{}, err
+		}
+		switch u.Scheme {
+		case "https", "http", "ssh", "git":
+		default:
+			return gitHubRepo{}, fmt.Errorf("not a GitHub repository URL: %q", raw)
+		}
+		host, path = u.Hostname(), u.Path
+	} else if m := scpLikeURLRe.FindStringSubmatch(raw); m != nil && len(m[1]) > 1 {
+		// A one-letter "host" is a Windows drive (C:/repo or C:\repo).
+		host, path = m[1], m[2]
+	} else {
+		return gitHubRepo{}, fmt.Errorf("not a GitHub repository URL: %q", raw)
+	}
+	parts := strings.Split(strings.TrimSuffix(strings.Trim(path, "/"), ".git"), "/")
+	if host == "" || len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return gitHubRepo{}, fmt.Errorf("not a GitHub repository URL: %q", raw)
+	}
+	return gitHubRepo{host: host, owner: parts[0], name: parts[1]}, nil
 }
 
 func hasRemoteBranch(remoteBranch string) bool {

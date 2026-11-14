@@ -56,7 +56,8 @@ gh sync
 | Up to date | Nothing |
 | Has commits that are not on the remote branch (ahead or diverged) | Left untouched: `warning: '<name>' seems to contain unpushed commits` |
 | Upstream branch was deleted, and every commit is in the remote default branch | Deleted: `Deleted branch <name> (was <sha>).` |
-| Upstream branch was deleted, but some commits are not in the remote default branch | Left untouched: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
+| Upstream branch was deleted, some commits are not in the remote default branch, but a merged pull request has the branch tip as its head (squash or rebase merge) | Deleted: `Deleted branch <name> (was <sha>, merged via #<number>).` |
+| Upstream branch was deleted, some commits are not in the remote default branch, and no merged pull request has the branch tip as its head | Left untouched: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
 | No counterpart on the main remote | Nothing |
 
 ### Safety
@@ -64,13 +65,13 @@ gh sync
 gh-sync only ever moves branches forward or removes ones that are fully merged:
 
 - It never merges, rebases, force-updates or pushes. A branch with local-only commits is always left as is.
-- A branch is deleted only when it tracked a branch on the main remote, that branch is gone, and the local branch has no commits missing from the remote default branch. Branches that never had an upstream are never deleted.
+- A branch is deleted only when it tracked a branch on the main remote, that branch is gone, and either the local branch has no commits missing from the remote default branch or a merged pull request's head commit is exactly the local branch tip. Branches that never had an upstream are never deleted.
+- The pull request lookup runs `gh api` against the main remote's repository. When it can't be done (`gh` not authenticated, a remote that is not on GitHub, an API error), the branch is kept with the "appears not merged" warning; `--verbose` shows why. A branch with commits added after its pull request was merged is also kept.
 - If the branch being deleted is checked out, gh-sync switches to the default branch first and reports it as `Switched to branch ...`.
 - A branch checked out in another worktree is not moved.
 
-Two things worth knowing:
+Worth knowing:
 
-- Pull requests merged with **squash** or **rebase** leave commits that are not in the default branch, so those local branches are reported as "appears not merged" and kept. Delete them yourself with `git branch -D`.
 - gh-sync updates your **local** branches only. When you sync a fork against `upstream`, push afterwards to update the fork on GitHub as well (e.g. `git push origin main`).
 
 ## Options

@@ -84,6 +84,10 @@ type syncFixture struct {
 	upstream string // non-bare repo that pushes to remote
 	remote   string // bare repo; the "origin" of local
 	local    string // repo gh-sync operates on (also the test's CWD)
+
+	// findMergedPR is passed to run(). It defaults to a finder that always
+	// fails, so tests never call gh; tests of the pull request path replace it.
+	findMergedPR mergedPRFinder
 }
 
 // newSyncFixture creates the fixture and chdirs into the local clone, so a
@@ -97,6 +101,9 @@ func newSyncFixture(t *testing.T) *syncFixture {
 		upstream: upstream,
 		remote:   filepath.Join(base, "remote.git"),
 		local:    filepath.Join(base, "local"),
+		findMergedPR: func(Remote, Remote, string, string) (int, error) {
+			return 0, errors.New("pull request lookup is not stubbed in this test")
+		},
 	}
 	f.gitIn(base, "clone", "--quiet", "--bare", upstream, f.remote)
 	f.gitIn(upstream, "remote", "add", "origin", f.remote)
@@ -225,7 +232,7 @@ func (f *syncFixture) sync(extraArgs ...string) syncResult {
 	}
 	origOut, origErr := os.Stdout, os.Stderr
 	os.Stdout, os.Stderr = outFile, errFile
-	runErr := run(args)
+	runErr := run(args, f.findMergedPR)
 	os.Stdout, os.Stderr = origOut, origErr
 
 	read := func(file *os.File) string {
@@ -435,6 +442,212 @@ func TestRunKeepsUnmergedGoneBranch(t *testing.T) {
 	}
 	if got := f.sha(f.local, "feature"); got != featureSHA {
 		t.Errorf("local feature = %s, want unchanged %s", got, featureSHA)
+	}
+}
+
+// squashMergeAndDelete simulates GitHub's "Squash and merge" followed by
+// deleting the branch: a new commit lands on main, so the branch's own commits
+// never become reachable from the default branch.
+func (f *syncFixture) squashMergeAndDelete(branch string) {
+	f.t.Helper()
+	f.upstreamGit("checkout", "--quiet", "main")
+	f.commit(f.upstream, branch+" (squashed)")
+	f.upstreamGit("push", "--quiet", "origin", "main")
+	f.deleteRemoteBranch(branch)
+}
+
+// prQuery records the arguments a mergedPRFinder was called with.
+type prQuery struct {
+	base, head, headBranch, tip string
+}
+
+func TestRunDeletesSquashMergedBranch(t *testing.T) {
+	tests := []struct {
+		name       string
+		local      string // local branch name; it always tracks origin/feature
+		checkedOut bool
+		dryRun     bool
+	}{
+		{"not checked out", "feature", false, false},
+		{"checked out", "feature", true, false},
+		// The pull request must be looked up by the remote branch name.
+		{"local name differs", "topic", false, false},
+		{"dry run", "feature", true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushUpstreamBranch("feature", "feature-1")
+			f.localGit("fetch", "--quiet", "origin")
+			f.localGit("branch", "--quiet", "--track", tt.local, "origin/feature")
+			tip := f.sha(f.local, tt.local)
+			if tt.checkedOut {
+				f.localGit("checkout", "--quiet", tt.local)
+			}
+			f.squashMergeAndDelete("feature")
+
+			var queries []prQuery
+			f.findMergedPR = func(base, head Remote, headBranch, sha string) (int, error) {
+				queries = append(queries, prQuery{base.Name, head.Name, headBranch, sha})
+				if headBranch == "feature" && sha == tip {
+					return 123, nil
+				}
+				return 0, nil
+			}
+			var args []string
+			if tt.dryRun {
+				args = append(args, "--dry-run")
+			}
+			res := f.sync(args...)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+
+			want := prQuery{base: "origin", head: "origin", headBranch: "feature", tip: tip}
+			if len(queries) != 1 || queries[0] != want {
+				t.Errorf("findMergedPR calls = %+v, want one call %+v", queries, want)
+			}
+			verb := "Deleted"
+			if tt.dryRun {
+				verb = "Would delete"
+			}
+			assertContains(t, "stdout", res.stdout, fmt.Sprintf("%s branch %s (was %s, merged via #123).", verb, tt.local, tip[:7]))
+			assertNotContains(t, "stderr", res.stderr, "appears not merged")
+
+			if tt.dryRun {
+				if !f.localBranchExists(tt.local) {
+					t.Errorf("--dry-run deleted %s", tt.local)
+				}
+				if f.currentBranch() != tt.local {
+					t.Errorf("current branch = %q, want %s", f.currentBranch(), tt.local)
+				}
+				return
+			}
+			if f.localBranchExists(tt.local) {
+				t.Errorf("local branch %s still exists", tt.local)
+			}
+			if f.currentBranch() != "main" {
+				t.Errorf("current branch = %q, want main", f.currentBranch())
+			}
+		})
+	}
+}
+
+// TestRunKeepsSquashMergedBranchWithoutPR checks the fallback: when no merged
+// pull request matches the tip, or the lookup fails, the branch is kept with
+// the usual warning. The failure reason is shown only with --verbose.
+func TestRunKeepsSquashMergedBranchWithoutPR(t *testing.T) {
+	lookupErr := errors.New("gh: not logged in")
+	tests := []struct {
+		name     string
+		err      error
+		verbose  bool
+		wantNote bool
+	}{
+		{"no matching pull request", nil, false, false},
+		{"lookup failed", lookupErr, false, false},
+		{"lookup failed, verbose", lookupErr, true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushUpstreamBranch("feature", "feature-1")
+			f.trackRemoteBranch("feature")
+			tip := f.sha(f.local, "feature")
+			f.squashMergeAndDelete("feature")
+			f.findMergedPR = func(Remote, Remote, string, string) (int, error) {
+				return 0, tt.err
+			}
+			var args []string
+			if tt.verbose {
+				args = append(args, "--verbose")
+			}
+
+			res := f.sync(args...)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			assertContains(t, "stderr", res.stderr, "warning: 'feature' was deleted on origin, but appears not merged into 'main'")
+			assertNotContains(t, "stdout", res.stdout, "Deleted branch feature")
+			note := "note: couldn't look up a merged pull request for 'feature': gh: not logged in"
+			if tt.wantNote {
+				assertContains(t, "stderr", res.stderr, note)
+			} else {
+				assertNotContains(t, "stderr", res.stderr, "note: couldn't look up")
+			}
+			if got := f.sha(f.local, "feature"); got != tip {
+				t.Errorf("local feature = %s, want unchanged %s", got, tip)
+			}
+		})
+	}
+}
+
+func TestMatchMergedPR(t *testing.T) {
+	output := []byte("12 aaaa\n34 bbbb\n")
+	tests := []struct {
+		name   string
+		output []byte
+		tip    string
+		want   int
+	}{
+		{"matching head", output, "bbbb", 34},
+		// A merged pull request whose head differs (commits were added
+		// after the merge) must not count.
+		{"no matching head", output, "cccc", 0},
+		{"no merged pull requests", nil, "bbbb", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := matchMergedPR(tt.output, tt.tip)
+			if err != nil {
+				t.Fatalf("matchMergedPR() error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("matchMergedPR() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+	if _, err := matchMergedPR([]byte("x bbbb\n"), "bbbb"); err == nil {
+		t.Error("matchMergedPR() with a non-numeric number: want error")
+	}
+}
+
+func TestParseGitHubURL(t *testing.T) {
+	tests := []struct {
+		url     string
+		want    gitHubRepo
+		wantErr bool
+	}{
+		{url: "https://github.com/him0/gh-sync.git", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "https://github.com/him0/gh-sync", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "https://github.com/him0/gh-sync/", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "https://user@ghe.example.com/org/repo.git", want: gitHubRepo{"ghe.example.com", "org", "repo"}},
+		{url: "git@github.com:him0/gh-sync.git", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "github.com:him0/gh-sync", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "ssh://git@github.com/him0/gh-sync.git", want: gitHubRepo{"github.com", "him0", "gh-sync"}},
+		{url: "ssh://git@ghe.example.com:2222/org/repo.git", want: gitHubRepo{"ghe.example.com", "org", "repo"}},
+		{url: "/home/me/repos/gh-sync.git", wantErr: true},
+		{url: `C:\repos\gh-sync.git`, wantErr: true},
+		{url: "C:/repos/gh-sync.git", wantErr: true},
+		{url: "file:///home/me/repos/gh-sync.git", wantErr: true},
+		{url: "https://gitlab.example.com/group/sub/repo.git", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			got, err := parseGitHubURL(tt.url)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("parseGitHubURL(%q) = %+v, want error", tt.url, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseGitHubURL(%q) error: %v", tt.url, err)
+			}
+			if got != tt.want {
+				t.Errorf("parseGitHubURL(%q) = %+v, want %+v", tt.url, got, tt.want)
+			}
+		})
 	}
 }
 
