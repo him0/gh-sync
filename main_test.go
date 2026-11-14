@@ -699,6 +699,51 @@ func TestParseMergedPRResponse(t *testing.T) {
 	}
 }
 
+func TestSSHResolvedHost(t *testing.T) {
+	tests := []struct {
+		name   string
+		host   string
+		output string
+		err    error
+		want   string
+	}{
+		{"alias", "github-work", "user git\nhostname github.com\nport 22\n", nil, "github.com"},
+		{"enterprise alias", "ghe", "hostname ghe.example.com\n", nil, "ghe.example.com"},
+		{"port 443", "ssh.github.com", "hostname ssh.github.com\nport 443\n", nil, "github.com"},
+		{"alias to port 443", "gh443", "hostname ssh.github.com\n", nil, "github.com"},
+		{"ssh failed", "github-work", "", errors.New("exec: \"ssh\": executable file not found in $PATH"), "github-work"},
+		{"ssh failed for ssh.github.com", "ssh.github.com", "", errors.New("exit status 255"), "github.com"},
+		{"no hostname line", "github.com", "user git\n", nil, "github.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sshResolvedHost(tt.host, []byte(tt.output), tt.err); got != tt.want {
+				t.Errorf("sshResolvedHost(%q, %q, %v) = %q, want %q", tt.host, tt.output, tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveGitHubHostLeavesNonSSHRemotes(t *testing.T) {
+	// An empty PATH makes any ssh call fail, so a resolved host proves ssh
+	// was not needed.
+	t.Setenv("PATH", "")
+	cfg := runConfig{sshHosts: map[string]string{"github-work": "github.com"}}
+	tests := []struct {
+		url, host, want string
+	}{
+		{"https://ssh.github.com/org/repo.git", "ssh.github.com", "ssh.github.com"},
+		{"github-work:org/repo.git", "github-work", "github.com"},                     // cached
+		{"ssh://git@ssh.github.com:443/org/repo.git", "ssh.github.com", "github.com"}, // ssh fails, mapped
+		{"-oProxyCommand=x:org/repo.git", "-oProxyCommand=x", "-oProxyCommand=x"},
+	}
+	for _, tt := range tests {
+		if got := resolveGitHubHost(cfg, tt.url, tt.host); got != tt.want {
+			t.Errorf("resolveGitHubHost(%q, %q) = %q, want %q", tt.url, tt.host, got, tt.want)
+		}
+	}
+}
+
 func TestParseGitHubURL(t *testing.T) {
 	tests := []struct {
 		url     string
