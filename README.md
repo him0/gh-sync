@@ -83,6 +83,8 @@ Two things worth knowing:
 | `--version` | Print the gh-sync version and exit |
 | `--help` | Print usage |
 
+gh-sync takes no positional arguments. Anything that is not an option, such as `gh sync dry-run` (missing `--`) or `gh sync foo --dry-run`, is rejected with `fatal: unexpected argument: ...` and the usage, and nothing is synced.
+
 ### Color
 
 With `--color=auto`, stdout and stderr are decided independently: each stream is colorized only when it is a terminal. `gh sync | grep Updated` therefore emits no escape sequences even though warnings on the terminal stay colored.
@@ -93,7 +95,7 @@ Setting the [`NO_COLOR`](https://no-color.org) environment variable disables col
 
 - `Updated branch ...`, `Switched to branch ...` and `Deleted branch ...` (`Would update branch ...`, `Would switch to branch ...` and `Would delete branch ...` with `--dry-run`) go to **stdout**.
 - Warnings, errors and `--verbose` logs go to **stderr**.
-- The exit status is `0` on success, including when branches were skipped with a warning, and `1` when gh-sync could not run (not a git repository, no remote, fetch failed) or an update or deletion failed.
+- The exit status is `0` on success, including when branches were skipped with a warning, and `1` when gh-sync could not run (an unexpected argument, not a git repository, no remote, fetch failed) or an update or deletion failed.
 
 ```console
 $ gh sync --verbose

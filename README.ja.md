@@ -83,6 +83,8 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 | `--version` | gh-sync のバージョンを表示して終了する |
 | `--help` | 使い方を表示する |
 
+gh-sync は位置引数を取りません。`gh sync dry-run`(`--` の付け忘れ)や `gh sync foo --dry-run` のようにオプション以外の引数を渡すと、`fatal: unexpected argument: ...` と使い方を表示してエラーになり、同期は行いません。
+
 ### 色
 
 `--color=auto` では stdout と stderr を別々に判定し、それぞれ端末に接続されているときだけ色を付けます。そのため `gh sync | grep Updated` ではエスケープシーケンスが出力されず、端末に出る警告には色が付いたままになります。
@@ -93,7 +95,7 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 
 - `Updated branch ...`、`Switched to branch ...`、`Deleted branch ...`(`--dry-run` では `Would update branch ...`、`Would switch to branch ...`、`Would delete branch ...`)は **stdout** に出力されます。
 - 警告、エラー、`--verbose` のログは **stderr** に出力されます。
-- 終了ステータスは、成功時(警告を出してブランチをスキップした場合を含む)が `0`、実行できなかったとき(git リポジトリではない、remote が無い、fetch に失敗した)や更新・削除に失敗したときが `1` です。
+- 終了ステータスは、成功時(警告を出してブランチをスキップした場合を含む)が `0`、実行できなかったとき(想定外の引数がある、git リポジトリではない、remote が無い、fetch に失敗した)や更新・削除に失敗したときが `1` です。
 
 ```console
 $ gh sync --verbose

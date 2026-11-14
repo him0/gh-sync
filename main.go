@@ -106,6 +106,14 @@ func run(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// gh-sync takes no positional arguments. flag stops parsing at the first
+	// non-flag argument, so silently ignoring the rest would turn
+	// "gh sync dry-run" or "gh sync foo --dry-run" into a real sync.
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "fatal: unexpected argument: %q\n", fs.Arg(0))
+		fs.Usage()
+		return fmt.Errorf("unexpected argument: %q", fs.Arg(0))
+	}
 
 	if showVersion {
 		fmt.Printf("gh-sync version %s\n", version)

@@ -680,3 +680,53 @@ func TestRunUpToDateIsNoop(t *testing.T) {
 		t.Errorf("local feature = %s, want unchanged %s", got, featureBefore)
 	}
 }
+
+// TestRunRejectsPositionalArguments checks that a positional argument is an
+// error and no branch is touched (issue #60). Go's flag package stops at the
+// first non-flag argument, so without this check "gh sync dry-run" (missing
+// "--") and "gh sync foo --dry-run" (flag after a positional argument) would
+// both run a real sync.
+func TestRunRejectsPositionalArguments(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantArg string
+	}{
+		{"missing dashes", []string{"dry-run"}, "dry-run"},
+		{"flag after positional", []string{"foo", "--dry-run"}, "foo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushUpstreamBranch("merged", "merged-1")
+			f.trackRemoteBranch("merged")
+			mainBefore := f.sha(f.local, "main")
+			mergedBefore := f.sha(f.local, "merged")
+
+			// Merging "merged" moves main forward, so a real sync would both
+			// fast-forward main and delete merged.
+			f.upstreamGit("merge", "--quiet", "--ff-only", "merged")
+			f.upstreamGit("push", "--quiet", "origin", "main")
+			f.deleteRemoteBranch("merged")
+
+			res := f.sync(tt.args...)
+			if res.err == nil {
+				t.Fatal("run() error = nil, want an error")
+			}
+			assertContains(t, "stderr", res.stderr, fmt.Sprintf("fatal: unexpected argument: %q", tt.wantArg))
+			assertContains(t, "stderr", res.stderr, "Usage:")
+			if res.stdout != "" {
+				t.Errorf("stdout = %q, want empty", res.stdout)
+			}
+			if got := f.sha(f.local, "main"); got != mainBefore {
+				t.Errorf("local main = %s, want unchanged %s", got, mainBefore)
+			}
+			if !f.localBranchExists("merged") {
+				t.Fatal("local branch merged was deleted")
+			}
+			if got := f.sha(f.local, "merged"); got != mergedBefore {
+				t.Errorf("local merged = %s, want unchanged %s", got, mergedBefore)
+			}
+		})
+	}
+}
