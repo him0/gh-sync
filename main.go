@@ -610,7 +610,7 @@ func checkoutDefaultBranchArgs(remoteName, defaultBranch string) []string {
 	if hasRemoteBranch("refs/heads/" + defaultBranch) {
 		return []string{"checkout", "--quiet", defaultBranch}
 	}
-	return []string{"checkout", "--quiet", "-b", defaultBranch, "--track", remoteName + "/" + defaultBranch}
+	return []string{"checkout", "--quiet", "-b", defaultBranch, "--track", "refs/remotes/" + remoteName + "/" + defaultBranch}
 }
 
 // squashCandidate is a gone branch whose commits are not in the default

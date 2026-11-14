@@ -67,7 +67,7 @@ gh-sync only ever moves branches forward or removes ones that are fully merged:
 - It never merges, rebases, force-updates or pushes. A branch with local-only commits is always left as is.
 - A branch is deleted only when it tracked a branch on the main remote, that branch is gone, and either the local branch has no commits missing from the remote default branch or the head commit of a pull request merged into the default branch is exactly the local branch tip. Branches that never had an upstream are never deleted.
 - These branches are looked up together after the other branches are processed, with one `gh api graphql` request per 50 branches against the main remote's repository, so their messages come last. When the lookup can't be done (`gh` not authenticated, a remote that is not on GitHub, an API error, no answer within 30 seconds), the branches are kept with the "appears not merged" warning; `--verbose` shows why. A branch with commits added after its pull request was merged is also kept.
-- If the branch being deleted is checked out, gh-sync switches to the default branch first and reports it as `Switched to branch ...`.
+- If the branch being deleted is checked out, gh-sync switches to the default branch first and reports it as `Switched to branch ...`. If there is no local default branch, it is created to track the main remote's default branch.
 - A branch checked out in another worktree is not moved.
 
 Worth knowing:
