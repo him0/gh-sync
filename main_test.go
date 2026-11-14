@@ -369,19 +369,107 @@ func TestRunFastForwardsCheckedOutBranchSharingNameWithTag(t *testing.T) {
 
 // TestGetLocalBranchesDetachedHead checks that the "(HEAD detached at ...)"
 // line printed by `git branch` is not returned as a branch name (#57).
-func TestGetLocalBranchesDetachedHead(t *testing.T) {
+func TestReadRefsDetachedHead(t *testing.T) {
 	f := newSyncFixture(t)
 	f.pushUpstreamBranch("feature", "feature-1")
 	f.trackRemoteBranch("feature")
 	f.localGit("checkout", "--quiet", "--detach", "main")
 
-	got, err := getLocalBranches()
+	refs, err := readRefs("origin")
 	if err != nil {
-		t.Fatalf("getLocalBranches() error: %v", err)
+		t.Fatalf("readRefs() error: %v", err)
+	}
+	var got []string
+	for _, b := range refs.branches {
+		got = append(got, b.name)
 	}
 	want := []string{"feature", "main"}
 	if !slices.Equal(got, want) {
-		t.Errorf("getLocalBranches() = %q, want %q", got, want)
+		t.Errorf("readRefs() branches = %q, want %q", got, want)
+	}
+}
+
+// TestReadRefs checks the tip, upstream and ahead/behind counts readRefs
+// reports for branches that are in sync, ahead, behind, diverged, gone and
+// without upstream, and that it lists the main remote's refs.
+func TestReadRefs(t *testing.T) {
+	f := newSyncFixture(t)
+	for _, name := range []string{"same", "ahead", "behind", "diverged", "gone"} {
+		f.pushUpstreamBranch(name, name+"-1")
+		f.trackRemoteBranch(name)
+	}
+	f.localGit("branch", "--no-track", "untracked", "main")
+	f.localGit("checkout", "--quiet", "ahead")
+	f.commit(f.local, "ahead-2")
+	f.localGit("checkout", "--quiet", "diverged")
+	f.commit(f.local, "diverged-local")
+	f.localGit("checkout", "--quiet", "main")
+	f.advanceUpstream("behind", "behind-2", "behind-3")
+	f.advanceUpstream("diverged", "diverged-remote")
+	f.deleteRemoteBranch("gone")
+	f.localGit("fetch", "--quiet", "--prune", "origin")
+
+	refs, err := readRefs("origin")
+	if err != nil {
+		t.Fatalf("readRefs() error: %v", err)
+	}
+	got := make(map[string]localBranch)
+	for _, b := range refs.branches {
+		got[b.name] = b
+	}
+	want := map[string]localBranch{
+		"main":      {name: "main", upstream: "refs/remotes/origin/main"},
+		"same":      {name: "same", upstream: "refs/remotes/origin/same"},
+		"ahead":     {name: "ahead", upstream: "refs/remotes/origin/ahead", ahead: 1},
+		"behind":    {name: "behind", upstream: "refs/remotes/origin/behind", behind: 2},
+		"diverged":  {name: "diverged", upstream: "refs/remotes/origin/diverged", ahead: 1, behind: 1},
+		"gone":      {name: "gone", upstream: "refs/remotes/origin/gone", gone: true},
+		"untracked": {name: "untracked"},
+	}
+	if len(got) != len(want) {
+		t.Errorf("readRefs() returned %d branches, want %d: %+v", len(got), len(want), refs.branches)
+	}
+	for name, w := range want {
+		w.tip = f.sha(f.local, "refs/heads/"+name)
+		if got[name] != w {
+			t.Errorf("branch %s = %+v, want %+v", name, got[name], w)
+		}
+	}
+	for _, ref := range []string{"refs/remotes/origin/main", "refs/remotes/origin/behind"} {
+		if !refs.remoteRefs[ref] {
+			t.Errorf("remoteRefs lacks %s: %v", ref, refs.remoteRefs)
+		}
+	}
+	if refs.remoteRefs["refs/remotes/origin/gone"] {
+		t.Errorf("remoteRefs has pruned refs/remotes/origin/gone")
+	}
+}
+
+func TestParseTrack(t *testing.T) {
+	tests := []struct {
+		track         string
+		ahead, behind int
+		gone, wantErr bool
+	}{
+		{track: ""},
+		{track: "[gone]", gone: true},
+		{track: "[ahead 3]", ahead: 3},
+		{track: "[behind 2]", behind: 2},
+		{track: "[ahead 1, behind 12]", ahead: 1, behind: 12},
+		{track: "ahead 1", wantErr: true},
+		{track: "[ahead x]", wantErr: true},
+		{track: "[voraus 1]", wantErr: true},
+		{track: "[]", wantErr: true},
+	}
+	for _, tt := range tests {
+		ahead, behind, gone, err := parseTrack(tt.track)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("parseTrack(%q) error = %v, wantErr %v", tt.track, err, tt.wantErr)
+			continue
+		}
+		if ahead != tt.ahead || behind != tt.behind || gone != tt.gone {
+			t.Errorf("parseTrack(%q) = %d, %d, %v, want %d, %d, %v", tt.track, ahead, behind, gone, tt.ahead, tt.behind, tt.gone)
+		}
 	}
 }
 
