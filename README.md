@@ -46,9 +46,9 @@ gh sync
 
 ### What it does
 
-1. **Picks the main remote.** The first one that exists out of `upstream`, `github`, `origin`; otherwise the first remote listed by git. In an ordinary clone that is `origin`. In a fork where you added an `upstream` remote, your branches are synced with the parent repository instead.
+1. **Picks the main remote.** The one given with `--remote`; otherwise the first one that exists out of `upstream`, `github`, `origin`; otherwise the first remote listed by git. In an ordinary clone that is `origin`. In a fork where you added an `upstream` remote, your branches are synced with the parent repository instead.
 2. **Fetches it** with `git fetch --prune`. When stderr is a terminal, git's fetch progress is shown there.
-3. **Walks every local branch** and compares it with its counterpart on the main remote: the configured upstream if the branch tracks that remote, otherwise the branch with the same name.
+3. **Walks every local branch**, except those matching an [exclude pattern](#excluding-branches), and compares it with its counterpart on the main remote: the configured upstream if the branch tracks that remote, otherwise the branch with the same name.
 
 | State of the local branch | Action |
 | --- | --- |
@@ -68,7 +68,7 @@ gh-sync only ever moves branches forward or removes ones that are fully merged:
 - A branch is deleted only when it tracked a branch on the main remote, that branch is gone, and either the local branch has no commits missing from the remote default branch or the head commit of a pull request merged into the default branch is exactly the local branch tip. Branches that never had an upstream are never deleted.
 - These branches are looked up together after the other branches are processed, with one `gh api graphql` request per 50 branches against the main remote's repository, so their messages come last. When the lookup can't be done (`gh` not authenticated, a remote that is not on GitHub, an API error, no answer within 30 seconds), the branches are kept with the "appears not merged" warning; `--verbose` shows why. A branch with commits added after its pull request was merged is also kept.
 - For a main remote reached over SSH, the GitHub host is read from `ssh -G <host>`, so host aliases from `~/.ssh/config` (`Host github-work` / `HostName github.com`) work, and `ssh.github.com` (SSH over port 443) is treated as `github.com`. If `ssh` can't resolve the host, the host in the URL is used.
-- If the branch being deleted is checked out, gh-sync switches to the default branch first and reports it as `Switched to branch ...`.
+- If the branch being deleted is checked out, gh-sync switches to the default branch first and reports it as `Switched to branch ...`. If there is no local default branch, it is created to track the main remote's default branch.
 - A branch checked out in another worktree is not moved.
 
 Worth knowing:
@@ -82,12 +82,30 @@ Worth knowing:
 | `--verbose` | Print each git command that changes something, and the `gh` command that looks up merged pull requests, as `$ git ...` / `$ gh ...`, to stderr (like hub's `HUB_VERBOSE=1`) |
 | `--dry-run` | Show what would be updated or deleted (`Would update branch ...`, `Would delete branch ...`, preceded by `Would switch to branch ...` when the checked-out branch would be deleted) without changing any local branch. The fetch still runs |
 | `--color=WHEN` | Colorize output: `auto` (default), `always` or `never` |
+| `--remote=NAME` | Use `NAME` as the main remote instead of choosing one automatically. gh-sync fails if no remote has that name |
+| `--exclude=GLOB` | Leave local branches matching `GLOB` alone (neither updated nor deleted). Can be given more than once. See [Excluding branches](#excluding-branches) |
 | `--version` | Print the gh-sync version and exit |
 | `--help` | Print usage to stdout |
 
 gh-sync takes no positional arguments. Anything that is not an option, such as `gh sync dry-run` (missing `--`) or `gh sync foo --dry-run`, is rejected with `fatal: unexpected argument: ...` and the usage, and nothing is synced.
 
+### Excluding branches
+
+Branches that match an exclude pattern are skipped entirely: they are never fast-forwarded or deleted. Patterns come from two places, and all of them apply:
+
+- the `gh-sync.exclude` git config key, which can hold several values:
+  ```sh
+  git config --add gh-sync.exclude 'wip/*'
+  git config --add gh-sync.exclude 'experiment'
+  ```
+  Use `--global` to apply them to every repository.
+- `--exclude=GLOB` on the command line, repeatable (`gh sync --exclude='wip/*' --exclude=tmp`).
+
+Patterns are matched against the whole local branch name with Go's [`path.Match`](https://pkg.go.dev/path#Match): `*` and `?` do not match `/`, so `wip/*` matches `wip/foo` but not `wip/foo/bar` (add `wip/*/*` for that). An invalid pattern such as `[` stops gh-sync with `fatal: invalid exclude pattern ...` before anything is fetched. `--verbose` prints `note: skipping '<name>' (excluded by '<pattern>')` for each skipped branch.
+
 ### Color
+
+Updated branches are shown in green, deleted branches in red, warnings in yellow and errors in bold red.
 
 With `--color=auto`, stdout and stderr are decided independently: each stream is colorized only when it is a terminal (the MSYS2 / Cygwin terminal of Git Bash counts as one). `gh sync | grep Updated` therefore emits no escape sequences even though warnings on the terminal stay colored.
 
@@ -126,7 +144,7 @@ git branch --set-upstream-to=<remote>/<branch> <name>
 ```
 
 **The wrong remote is used**
-The priority is fixed: `upstream`, `github`, `origin`. Rename your remotes accordingly (`git remote rename <old> upstream`).
+Without `--remote`, the priority is `upstream`, `github`, `origin`. Name the remote to use with `--remote` (`gh sync --remote=fork`), or rename your remotes accordingly (`git remote rename <old> upstream`).
 
 When reporting a bug, please include the output of `gh sync --version` and `gh sync --verbose`.
 

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -38,6 +39,7 @@ type colorConfig struct {
 	lightGreen string
 	red        string
 	lightRed   string
+	yellow     string
 	magenta    string
 	reset      string
 }
@@ -53,6 +55,7 @@ func newColorConfig(enabled bool) colorConfig {
 		lightGreen: "\033[32;1m",
 		red:        "\033[31m",
 		lightRed:   "\033[31;1m",
+		yellow:     "\033[33m",
 		magenta:    "\033[35m",
 		reset:      "\033[0m",
 	}
@@ -117,11 +120,15 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		verbose     bool
 		dryRun      bool
 		colorFlag   string
+		remoteFlag  string
+		excludeFlag stringList
 		showVersion bool
 	)
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
 	fs.BoolVar(&dryRun, "dry-run", false, "show what would be updated or deleted without changing branches")
 	fs.StringVar(&colorFlag, "color", "auto", "colorize output (always, never, auto)")
+	fs.StringVar(&remoteFlag, "remote", "", "sync against this remote instead of the automatically chosen one")
+	fs.Var(&excludeFlag, "exclude", "skip local branches matching this glob (repeatable)")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 	// fs.Parse calls fs.Usage both for --help and for parse errors, so it
 	// cannot tell which stream to use. Print the usage after Parse instead:
@@ -173,7 +180,13 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		return err
 	}
 
-	remote, err := getMainRemote()
+	excludes, err := getExcludePatterns(excludeFlag)
+	if err != nil {
+		printError(cfg.stderrColors, "fatal: %s", err.Error())
+		return err
+	}
+
+	remote, err := getMainRemote(remoteFlag)
 	if err != nil {
 		printError(cfg.stderrColors, "%s", err.Error())
 		return err
@@ -224,6 +237,12 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 	hadFailure := false
 	var candidates []squashCandidate
 	for _, branch := range branches {
+		if pattern, ok := matchExclude(excludes, branch); ok {
+			if cfg.verbose {
+				fmt.Fprintf(os.Stderr, "note: skipping '%s' (excluded by '%s')\n", branch, pattern)
+			}
+			continue
+		}
 		if perr := processBranch(cfg, branch, remote, branchToRemote, &currentBranch, defaultBranch, fullDefaultBranch, &candidates); perr != nil {
 			hadFailure = true
 		}
@@ -236,10 +255,10 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		for _, c := range candidates {
 			pr := merged[c.branch]
 			if pr == 0 {
-				fmt.Fprintf(os.Stderr, "warning: '%s' was deleted on %s, but appears not merged into '%s'\n", c.branch, remote.Name, defaultBranch)
+				printWarning(cfg.stderrColors, "'%s' was deleted on %s, but appears not merged into '%s'", c.branch, remote.Name, defaultBranch)
 				continue
 			}
-			if derr := deleteBranch(cfg, c.branch, c.tip, fmt.Sprintf(", merged via #%d", pr), &currentBranch, defaultBranch); derr != nil {
+			if derr := deleteBranch(cfg, c.branch, c.tip, fmt.Sprintf(", merged via #%d", pr), &currentBranch, remote.Name, defaultBranch); derr != nil {
 				hadFailure = true
 			}
 		}
@@ -261,6 +280,10 @@ Options:
         show what would be updated or deleted without changing branches
   --color string
         colorize output (always, never, auto) (default "auto")
+  --remote name
+        sync against this remote instead of the automatically chosen one
+  --exclude glob
+        skip local branches matching this glob (repeatable)
   --version
         print version and exit
 `
@@ -269,6 +292,65 @@ func printUsage(w io.Writer) {
 	// Like the other writes to stdout/stderr, a failed write has nowhere
 	// better to be reported.
 	_, _ = fmt.Fprint(w, usageText)
+}
+
+// stringList is a flag.Value that collects every occurrence of a repeatable
+// flag.
+type stringList []string
+
+func (l *stringList) String() string { return strings.Join(*l, ",") }
+
+func (l *stringList) Set(v string) error {
+	*l = append(*l, v)
+	return nil
+}
+
+// getExcludePatterns returns the branch exclude patterns: every
+// gh-sync.exclude value from git config followed by the --exclude flags.
+// Both sources add to the set; neither replaces the other. A pattern that
+// path.Match cannot parse is an error, so a typo doesn't silently match
+// nothing.
+func getExcludePatterns(flags []string) ([]string, error) {
+	var patterns []string
+	cmd := exec.Command("git", "config", "--get-all", "gh-sync.exclude")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		// Exit code 1 means the key is not set.
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			if msg := strings.TrimSpace(stderr.String()); msg != "" {
+				return nil, fmt.Errorf("couldn't read gh-sync.exclude: %w: %s", err, msg)
+			}
+			return nil, fmt.Errorf("couldn't read gh-sync.exclude: %w", err)
+		}
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			patterns = append(patterns, p)
+		}
+	}
+	patterns = append(patterns, flags...)
+	for _, p := range patterns {
+		if _, err := path.Match(p, ""); err != nil {
+			return nil, fmt.Errorf("invalid exclude pattern %q: %w", p, err)
+		}
+	}
+	return patterns, nil
+}
+
+// matchExclude returns the first pattern in patterns that matches branch.
+// Patterns use path.Match syntax, so "*" does not cross a "/": "wip/*"
+// matches "wip/foo" but not "wip/foo/bar".
+func matchExclude(patterns []string, branch string) (string, bool) {
+	for _, p := range patterns {
+		// Patterns were validated by getExcludePatterns.
+		if ok, _ := path.Match(p, branch); ok {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // isTerminal reports whether fd is a terminal, including the MSYS2 / Cygwin
@@ -307,13 +389,24 @@ func checkGitRepo() error {
 	return cmd.Run()
 }
 
-func getMainRemote() (*Remote, error) {
+// getMainRemote returns the remote named name, or when name is empty the
+// first of upstream, github and origin that exists, else the first remote.
+func getMainRemote(name string) (*Remote, error) {
 	// Priority order: upstream, github, origin, others
 	priorityOrder := []string{"upstream", "github", "origin"}
 
 	remotes, err := getRemotes()
 	if err != nil {
 		return nil, err
+	}
+
+	if name != "" {
+		for _, remote := range remotes {
+			if remote.Name == name {
+				return &remote, nil
+			}
+		}
+		return nil, fmt.Errorf("fatal: no such remote '%s'", name)
 	}
 
 	if len(remotes) == 0 {
@@ -502,7 +595,7 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 			// config typo.
 			candidate := fmt.Sprintf("refs/remotes/%s/%s", remote.Name, branch)
 			if hasRemoteBranch(candidate) {
-				fmt.Fprintf(os.Stderr, "warning: '%s' upstream config is broken; skipping\n", branch)
+				printWarning(cfg.stderrColors, "'%s' upstream config is broken; skipping", branch)
 				return nil
 			}
 			remoteBranch = ""
@@ -523,7 +616,7 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 	if remoteBranch != "" {
 		ahead, behind, err := getCommitDifference(fullBranch, remoteBranch)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: couldn't compare '%s' against '%s': %s\n", branch, remoteBranch, err.Error())
+			printWarning(cfg.stderrColors, "couldn't compare '%s' against '%s': %s", branch, remoteBranch, err.Error())
 			return err
 		}
 		switch {
@@ -545,12 +638,12 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 				updateErr = runGitSilent(cfg, "branch", "-f", branch, remoteBranch)
 			}
 			if updateErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: couldn't fast-forward '%s': %s\n", branch, updateErr.Error())
+				printWarning(cfg.stderrColors, "couldn't fast-forward '%s': %s", branch, updateErr.Error())
 				return updateErr
 			}
 			fmt.Printf("%sUpdated branch %s%s%s (was %s).\n", cfg.stdoutColors.green, cfg.stdoutColors.lightGreen, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
 		default:
-			fmt.Fprintf(os.Stderr, "warning: '%s' seems to contain unpushed commits\n", branch)
+			printWarning(cfg.stderrColors, "'%s' seems to contain unpushed commits", branch)
 		}
 		return nil
 	}
@@ -561,7 +654,7 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 
 	ahead, _, err := getCommitDifference(fullBranch, fullDefaultBranch)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: couldn't compare '%s' against '%s': %s\n", branch, fullDefaultBranch, err.Error())
+		printWarning(cfg.stderrColors, "couldn't compare '%s' against '%s': %s", branch, fullDefaultBranch, err.Error())
 		return err
 	}
 	oldCommit := getCommitSHA(fullBranch)
@@ -571,19 +664,19 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 		*candidates = append(*candidates, squashCandidate{branch: branch, tip: oldCommit})
 		return nil
 	}
-	return deleteBranch(cfg, branch, oldCommit, "", currentBranch, defaultBranch)
+	return deleteBranch(cfg, branch, oldCommit, "", currentBranch, remote.Name, defaultBranch)
 }
 
 // deleteBranch deletes branch, checking out defaultBranch first when branch
 // is checked out. reason is appended to the "(was <sha>" part of the message.
 // With --dry-run it only reports what it would do.
-func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch *string, defaultBranch string) error {
+func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch *string, remoteName, defaultBranch string) error {
 	if branch == *currentBranch {
 		if cfg.dryRun {
 			fmt.Printf("Would switch to branch %s.\n", defaultBranch)
 		} else {
-			if err := runGitSilent(cfg, "checkout", "--quiet", defaultBranch); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: couldn't checkout '%s': %s\n", defaultBranch, err.Error())
+			if err := runGitSilent(cfg, checkoutDefaultBranchArgs(remoteName, defaultBranch)...); err != nil {
+				printWarning(cfg.stderrColors, "couldn't checkout '%s': %s", defaultBranch, err.Error())
 				return err
 			}
 			fmt.Printf("Switched to branch %s.\n", defaultBranch)
@@ -597,11 +690,23 @@ func deleteBranch(cfg runConfig, branch, oldCommit, reason string, currentBranch
 		return nil
 	}
 	if err := runGitSilent(cfg, "branch", "-D", branch); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: couldn't delete '%s': %s\n", branch, err.Error())
+		printWarning(cfg.stderrColors, "couldn't delete '%s': %s", branch, err.Error())
 		return err
 	}
 	fmt.Printf("%sDeleted branch %s%s%s (was %s%s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit), reason)
 	return nil
+}
+
+// checkoutDefaultBranchArgs returns the git arguments that switch to
+// defaultBranch. Without a local branch of that name, a plain checkout makes
+// git guess the remote-tracking branch to create it from, which fails when
+// several remotes have one (a fork with origin and upstream). The local branch
+// is then created explicitly from the main remote instead.
+func checkoutDefaultBranchArgs(remoteName, defaultBranch string) []string {
+	if hasRemoteBranch("refs/heads/" + defaultBranch) {
+		return []string{"checkout", "--quiet", defaultBranch}
+	}
+	return []string{"checkout", "--quiet", "-b", defaultBranch, "--track", "refs/remotes/" + remoteName + "/" + defaultBranch}
 }
 
 // squashCandidate is a gone branch whose commits are not in the default
@@ -1022,4 +1127,10 @@ func colorizeOutput(flag string, isTerminal, noColor bool) bool {
 
 func printError(colors colorConfig, format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "%s%s%s\n", colors.lightRed, fmt.Sprintf(format, args...), colors.reset)
+}
+
+// printWarning prints "warning: <message>" to stderr, in yellow when colors
+// are enabled.
+func printWarning(colors colorConfig, format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "%swarning: %s%s\n", colors.yellow, fmt.Sprintf(format, args...), colors.reset)
 }
