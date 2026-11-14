@@ -58,6 +58,7 @@ gh sync
 | Upstream branch was deleted, and every commit is in the remote default branch | Deleted: `Deleted branch <name> (was <sha>).` |
 | Upstream branch was deleted, some commits are not in the remote default branch, but a pull request merged into the default branch has the branch tip as its head (squash or rebase merge) | Deleted: `Deleted branch <name> (was <sha>, merged via #<number>).` |
 | Upstream branch was deleted, some commits are not in the remote default branch, and no pull request merged into the default branch has the branch tip as its head | Left untouched: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
+| Tracks a branch git has no remote-tracking ref for, because it is outside the remote's fetch refspec (a single-branch or shallow clone, or `refs/pull/<N>/head` set by `gh pr checkout`) | Nothing (`--verbose` prints a note): the remote branch may still exist |
 | No counterpart on the main remote | Nothing |
 
 ### Safety
@@ -65,7 +66,7 @@ gh sync
 gh-sync only ever moves branches forward or removes ones that are fully merged:
 
 - It never merges, rebases, force-updates or pushes. A branch with local-only commits is always left as is.
-- A branch is deleted only when it tracked a branch on the main remote, that branch is gone, and either the local branch has no commits missing from the remote default branch or the head commit of a pull request merged into the default branch is exactly the local branch tip. Branches that never had an upstream are never deleted.
+- A branch is deleted only when it tracked a branch on the main remote, git pruned its remote-tracking ref for that branch (`%(upstream:track)` is `[gone]`), and either the local branch has no commits missing from the remote default branch or the head commit of a pull request merged into the default branch is exactly the local branch tip. Branches that never had an upstream are never deleted.
 - These branches are looked up together after the other branches are processed, with one `gh api graphql` request per 50 branches against the main remote's repository, so their messages come last. When the lookup can't be done (`gh` not authenticated, a remote that is not on GitHub, an API error, no answer within 30 seconds), the branches are kept with the "appears not merged" warning; `--verbose` shows why. A branch with commits added after its pull request was merged is also kept.
 - If the branch being deleted is checked out, gh-sync switches to the default branch first and reports it as `Switched to branch ...`.
 - A branch checked out in another worktree is not moved.

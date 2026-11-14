@@ -58,6 +58,7 @@ gh sync
 | upstream ブランチが削除済みで、全コミットがリモートのデフォルトブランチに含まれる | 削除する: `Deleted branch <name> (was <sha>).` |
 | upstream ブランチが削除済みで、リモートのデフォルトブランチに無いコミットがあるが、デフォルトブランチにマージ済みの pull request の head がブランチの先頭と一致する(squash や rebase でのマージ) | 削除する: `Deleted branch <name> (was <sha>, merged via #<number>).` |
 | upstream ブランチが削除済みで、リモートのデフォルトブランチに無いコミットがあり、head がブランチの先頭と一致する、デフォルトブランチにマージ済みの pull request も無い | 触らない: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
+| 追跡しているブランチが remote の fetch refspec の対象外で、remote-tracking ref が無い(single-branch クローンや shallow クローン、`gh pr checkout` が設定する `refs/pull/<N>/head`) | 何もしない(`--verbose` で note を表示): remote のブランチは残っている可能性がある |
 | main remote に対応するブランチが無い | 何もしない |
 
 ### 安全性
@@ -65,7 +66,7 @@ gh sync
 gh-sync が行うのは、ブランチを前に進めることと、完全にマージ済みのブランチを削除することだけです。
 
 - merge、rebase、強制更新、push は一切しません。ローカルにしか無いコミットを持つブランチは必ずそのまま残ります。
-- ブランチを削除するのは、main remote 上のブランチを追跡していて、そのブランチが消えており、かつリモートのデフォルトブランチに無いコミットを持たないか、デフォルトブランチにマージ済みの pull request の head コミットがローカルブランチの先頭と完全に一致する場合だけです。upstream を一度も設定していないブランチは削除しません。
+- ブランチを削除するのは、main remote 上のブランチを追跡していて、git がそのブランチの remote-tracking ref を prune しており(`%(upstream:track)` が `[gone]`)、かつリモートのデフォルトブランチに無いコミットを持たないか、デフォルトブランチにマージ済みの pull request の head コミットがローカルブランチの先頭と完全に一致する場合だけです。upstream を一度も設定していないブランチは削除しません。
 - こうしたブランチは、ほかのブランチの処理が終わったあとに、main remote のリポジトリに対する `gh api graphql` のリクエスト(50 本ごとに 1 回)でまとめて確認します。そのため、これらのメッセージは最後に出力されます。確認できない場合(`gh` が未認証、GitHub 以外の remote、API エラー、30 秒以内に応答が無い)は「appears not merged」の警告を出してブランチを残します。理由は `--verbose` で表示されます。pull request のマージ後にコミットを追加したブランチも残します。
 - 削除対象のブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替え、`Switched to branch ...` と表示します。
 - 別の worktree でチェックアウトされているブランチは動かしません。
