@@ -42,8 +42,9 @@ go mod tidy
 - `--color[=WHEN]`: Control color output
   - `always`: Always colorize output (both stdout and stderr, even if `NO_COLOR` is set)
   - `never`: Never colorize output
-  - `auto`: Colorize each stream only when it is a terminal (default). stdout messages (e.g. `Updated branch ...`) follow stdout, errors and verbose logs follow stderr, so `gh sync | grep Updated` emits no escape sequences. Color is disabled when the `NO_COLOR` environment variable is set (`--color=always` still forces it)
+  - `auto`: Colorize each stream only when it is a terminal (default). stdout messages (e.g. `Updated branch ...`) follow stdout, errors and verbose logs follow stderr, so `gh sync | grep Updated` emits no escape sequences. Color is disabled when the `NO_COLOR` environment variable is set to a non-empty value (an empty `NO_COLOR=` is ignored; `--color=always` still forces it). Terminals are detected with `isatty.IsTerminal || isatty.IsCygwinTerminal` so Git Bash (mintty) counts as a terminal
 - `--version`: Print the version and exit (`dev` unless built by the release workflow)
+- `--help`: Print the usage to stdout (usage errors print it to stderr)
 
 ## Architecture
 
@@ -52,13 +53,14 @@ The entire application is contained in a single `main.go` file with the followin
 - `main()`: Entry point that orchestrates the sync workflow and parses command line flags
 - `getMainRemote()`: Finds the main remote (priority: upstream, github, origin)
 - `getDefaultBranch()`: Determines the default branch (prefers main over master)
-- `runGitSilent()`: Wrapper for executing git commands with verbose logging support
+- `runGitSilent()`: Wrapper for executing git commands with verbose logging support; captures stderr into the returned error (callers print it, so it is not printed again under --verbose)
+- `runGitStderr()`: Like `runGitSilent()` but streams git's stderr to the user; used for `git fetch --progress` when stderr is a terminal
 - `verboseLog()`: Logs git commands when --verbose flag is enabled
 - `colorizeOutput()`: Decides whether one output stream should be colorized from the --color flag, that stream's TTY status and `NO_COLOR` (called separately for stdout and stderr)
 
 ## Key Implementation Details
 
-1. **Command Line Parsing**: Uses Go's `flag` package for --verbose, --dry-run and --color options
+1. **Command Line Parsing**: Uses Go's `flag` package for --verbose, --dry-run and --color options; positional arguments are rejected with `fatal: unexpected argument: ...` and the usage, without syncing
 2. **Verbose Logging**: Shows git commands in `$ git command args` format with magenta color
 3. **Color Output**: Uses ANSI escape codes with per-stream isatty detection (`runConfig` holds separate `stdoutColors` / `stderrColors`)
 4. **Default Branch Detection**: Runs after `git fetch`. Uses `refs/remotes/<remote>/HEAD` if the ref it points at exists, then tries main, then master; if none is found, exits with an error suggesting `git remote set-head <remote> --auto`

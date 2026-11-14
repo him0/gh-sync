@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -75,7 +76,7 @@ func main() {
 	if err == nil {
 		return
 	}
-	// --help / -h prints usage to stderr from inside fs.Parse and returns
+	// --help / -h makes run() print the usage to stdout and return
 	// flag.ErrHelp. That's a successful invocation, not a failure.
 	if errors.Is(err, flag.ErrHelp) {
 		return
@@ -95,16 +96,26 @@ func run(args []string) error {
 	fs.BoolVar(&dryRun, "dry-run", false, "show what would be updated or deleted without changing branches")
 	fs.StringVar(&colorFlag, "color", "auto", "colorize output (always, never, auto)")
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: gh-sync [options]\n")
-		fmt.Fprintf(os.Stderr, "\nOptions:\n")
-		fmt.Fprintf(os.Stderr, "  --verbose\n        verbose output\n")
-		fmt.Fprintf(os.Stderr, "  --dry-run\n        show what would be updated or deleted without changing branches\n")
-		fmt.Fprintf(os.Stderr, "  --color string\n        colorize output (always, never, auto) (default \"auto\")\n")
-		fmt.Fprintf(os.Stderr, "  --version\n        print version and exit\n")
-	}
+	// fs.Parse calls fs.Usage both for --help and for parse errors, so it
+	// cannot tell which stream to use. Print the usage after Parse instead:
+	// to stdout when help was requested (so `gh sync --help | less` works)
+	// and to stderr for usage errors.
+	fs.Usage = func() {}
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printUsage(os.Stdout)
+		} else {
+			printUsage(os.Stderr)
+		}
 		return err
+	}
+	// gh-sync takes no positional arguments. flag stops parsing at the first
+	// non-flag argument, so silently ignoring the rest would turn
+	// "gh sync dry-run" or "gh sync foo --dry-run" into a real sync.
+	if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "fatal: unexpected argument: %q\n", fs.Arg(0))
+		printUsage(os.Stderr)
+		return fmt.Errorf("unexpected argument: %q", fs.Arg(0))
 	}
 
 	if showVersion {
@@ -119,10 +130,11 @@ func run(args []string) error {
 		return fmt.Errorf("invalid --color value: %q", colorFlag)
 	}
 
-	_, noColor := os.LookupEnv("NO_COLOR")
+	noColor := noColorSet()
+	stderrIsTerminal := isTerminal(os.Stderr.Fd())
 	cfg := runConfig{
-		stdoutColors: newColorConfig(colorizeOutput(colorFlag, isatty.IsTerminal(os.Stdout.Fd()), noColor)),
-		stderrColors: newColorConfig(colorizeOutput(colorFlag, isatty.IsTerminal(os.Stderr.Fd()), noColor)),
+		stdoutColors: newColorConfig(colorizeOutput(colorFlag, isTerminal(os.Stdout.Fd()), noColor)),
+		stderrColors: newColorConfig(colorizeOutput(colorFlag, stderrIsTerminal, noColor)),
 		verbose:      verbose,
 		dryRun:       dryRun,
 	}
@@ -143,7 +155,17 @@ func run(args []string) error {
 		currentBranch = branch
 	}
 
-	if err := runGitSilent(cfg, "fetch", "--prune", "--quiet", "--progress", remote.Name); err != nil {
+	// --progress only shows something when git's stderr reaches the user, so
+	// pass it through when stderr is a terminal. Otherwise capture it as
+	// before, so a failure is reported once, inside the error below.
+	fetchArgs := []string{"fetch", "--prune", "--quiet", "--progress", remote.Name}
+	var fetchErr error
+	if stderrIsTerminal {
+		fetchErr = runGitStderr(cfg, fetchArgs...)
+	} else {
+		fetchErr = runGitSilent(cfg, fetchArgs...)
+	}
+	if err := fetchErr; err != nil {
 		printError(cfg.stderrColors, "Failed to fetch from %s: %s", remote.Name, err.Error())
 		return err
 	}
@@ -181,6 +203,38 @@ func run(args []string) error {
 		return fmt.Errorf("one or more branches failed to sync")
 	}
 	return nil
+}
+
+// usageText is printed by --help and after usage errors.
+const usageText = `Usage: gh sync [options]
+
+Options:
+  --verbose
+        verbose output
+  --dry-run
+        show what would be updated or deleted without changing branches
+  --color string
+        colorize output (always, never, auto) (default "auto")
+  --version
+        print version and exit
+`
+
+func printUsage(w io.Writer) {
+	// Like the other writes to stdout/stderr, a failed write has nowhere
+	// better to be reported.
+	_, _ = fmt.Fprint(w, usageText)
+}
+
+// isTerminal reports whether fd is a terminal, including the MSYS2 / Cygwin
+// pty used by Git Bash (mintty), which isatty.IsTerminal does not recognize.
+func isTerminal(fd uintptr) bool {
+	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
+}
+
+// noColorSet reports whether NO_COLOR asks to disable color. Per
+// https://no-color.org it counts only when present and not an empty string.
+func noColorSet() bool {
+	return os.Getenv("NO_COLOR") != ""
 }
 
 // gitOutput runs git with the given args, captures stdout, and on failure
@@ -548,6 +602,9 @@ func shortSHA(sha string) string {
 	return sha[:7]
 }
 
+// runGitSilent runs git and captures its stderr. On failure the captured
+// stderr is wrapped into the returned error; callers print that error, so it
+// is not printed here as well (even with --verbose).
 func runGitSilent(cfg runConfig, args ...string) error {
 	verboseLog(cfg, "git", args)
 	cmd := exec.Command("git", args...)
@@ -556,14 +613,21 @@ func runGitSilent(cfg runConfig, args ...string) error {
 	err := cmd.Run()
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
-		if cfg.verbose && msg != "" {
-			fmt.Fprintln(os.Stderr, msg)
-		}
 		if msg != "" {
 			return fmt.Errorf("%w: %s", err, msg)
 		}
 	}
 	return err
+}
+
+// runGitStderr runs git with its stderr connected to os.Stderr, so progress
+// and diagnostics reach the user as git writes them. The returned error is
+// git's bare exit status: its message has already been shown.
+func runGitStderr(cfg runConfig, args ...string) error {
+	verboseLog(cfg, "git", args)
+	cmd := exec.Command("git", args...)
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func verboseLog(cfg runConfig, cmd string, args []string) {
@@ -578,7 +642,8 @@ func verboseLog(cfg runConfig, cmd string, args []string) {
 
 // colorizeOutput resolves whether a single output stream should be colorized.
 // isTerminal reports whether that stream is a terminal and noColor whether the
-// NO_COLOR environment variable (https://no-color.org) is set. run() calls it
+// NO_COLOR environment variable (https://no-color.org) is set to a non-empty
+// value. run() calls it
 // once per stream (stdout and stderr) so each is decided independently.
 //
 //   - "always": colorize regardless of isTerminal and noColor.

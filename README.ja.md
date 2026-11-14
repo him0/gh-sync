@@ -47,7 +47,7 @@ gh sync
 ### 動作
 
 1. **main remote を決めます。** `upstream`、`github`、`origin` の順に探して最初に見つかったものを使い、どれも無ければ git が最初に列挙する remote を使います。通常の clone では `origin` です。fork に `upstream` を追加している場合は、代わりに親リポジトリと同期します。
-2. `git fetch --prune` で **その remote を fetch します。**
+2. `git fetch --prune` で **その remote を fetch します。** stderr が端末のときは、fetch の進捗がそこに表示されます。
 3. **すべてのローカルブランチを順に調べ**、main remote 上の対応するブランチと比較します。ブランチがその remote を追跡していれば設定済みの upstream と、そうでなければ同名のブランチと比較します。
 
 | ローカルブランチの状態 | 動作 |
@@ -81,19 +81,21 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 | `--dry-run` | 更新・削除されるブランチを表示する(`Would update branch ...`、`Would delete branch ...`。チェックアウト中のブランチが削除される場合は、その前に `Would switch to branch ...`)だけで、ローカルブランチは変更しない。fetch は実行する |
 | `--color=WHEN` | 出力に色を付ける: `auto`(デフォルト)、`always`、`never` |
 | `--version` | gh-sync のバージョンを表示して終了する |
-| `--help` | 使い方を表示する |
+| `--help` | 使い方を stdout に表示する |
+
+gh-sync は位置引数を取りません。`gh sync dry-run`(`--` の付け忘れ)や `gh sync foo --dry-run` のようにオプション以外の引数を渡すと、`fatal: unexpected argument: ...` と使い方を表示してエラーになり、同期は行いません。
 
 ### 色
 
-`--color=auto` では stdout と stderr を別々に判定し、それぞれ端末に接続されているときだけ色を付けます。そのため `gh sync | grep Updated` ではエスケープシーケンスが出力されず、端末に出る警告には色が付いたままになります。
+`--color=auto` では stdout と stderr を別々に判定し、それぞれ端末(Git Bash の MSYS2 / Cygwin 端末を含む)に接続されているときだけ色を付けます。そのため `gh sync | grep Updated` ではエスケープシーケンスが出力されず、端末に出る警告には色が付いたままになります。
 
-環境変数 [`NO_COLOR`](https://no-color.org) を設定すると、`auto` では色が無効になります。`--color=always` はこれより優先されます。
+環境変数 [`NO_COLOR`](https://no-color.org) に空でない値を設定すると、`auto` では色が無効になります(空の `NO_COLOR=` は無視します)。`--color=always` はこれより優先されます。
 
 ### 出力と終了ステータス
 
 - `Updated branch ...`、`Switched to branch ...`、`Deleted branch ...`(`--dry-run` では `Would update branch ...`、`Would switch to branch ...`、`Would delete branch ...`)は **stdout** に出力されます。
-- 警告、エラー、`--verbose` のログは **stderr** に出力されます。
-- 終了ステータスは、成功時(警告を出してブランチをスキップした場合を含む)が `0`、実行できなかったとき(git リポジトリではない、remote が無い、fetch に失敗した)や更新・削除に失敗したときが `1` です。
+- 警告、エラー、`--verbose` のログ、git の fetch の進捗は **stderr** に出力されます。失敗した git コマンドのメッセージは、警告やエラーの中に 1 回だけ表示されます。
+- 終了ステータスは、成功時(警告を出してブランチをスキップした場合を含む)が `0`、実行できなかったとき(想定外の引数がある、git リポジトリではない、remote が無い、fetch に失敗した)や更新・削除に失敗したときが `1` です。
 
 ```console
 $ gh sync --verbose

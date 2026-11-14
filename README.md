@@ -47,7 +47,7 @@ gh sync
 ### What it does
 
 1. **Picks the main remote.** The first one that exists out of `upstream`, `github`, `origin`; otherwise the first remote listed by git. In an ordinary clone that is `origin`. In a fork where you added an `upstream` remote, your branches are synced with the parent repository instead.
-2. **Fetches it** with `git fetch --prune`.
+2. **Fetches it** with `git fetch --prune`. When stderr is a terminal, git's fetch progress is shown there.
 3. **Walks every local branch** and compares it with its counterpart on the main remote: the configured upstream if the branch tracks that remote, otherwise the branch with the same name.
 
 | State of the local branch | Action |
@@ -81,19 +81,21 @@ Two things worth knowing:
 | `--dry-run` | Show what would be updated or deleted (`Would update branch ...`, `Would delete branch ...`, preceded by `Would switch to branch ...` when the checked-out branch would be deleted) without changing any local branch. The fetch still runs |
 | `--color=WHEN` | Colorize output: `auto` (default), `always` or `never` |
 | `--version` | Print the gh-sync version and exit |
-| `--help` | Print usage |
+| `--help` | Print usage to stdout |
+
+gh-sync takes no positional arguments. Anything that is not an option, such as `gh sync dry-run` (missing `--`) or `gh sync foo --dry-run`, is rejected with `fatal: unexpected argument: ...` and the usage, and nothing is synced.
 
 ### Color
 
-With `--color=auto`, stdout and stderr are decided independently: each stream is colorized only when it is a terminal. `gh sync | grep Updated` therefore emits no escape sequences even though warnings on the terminal stay colored.
+With `--color=auto`, stdout and stderr are decided independently: each stream is colorized only when it is a terminal (the MSYS2 / Cygwin terminal of Git Bash counts as one). `gh sync | grep Updated` therefore emits no escape sequences even though warnings on the terminal stay colored.
 
-Setting the [`NO_COLOR`](https://no-color.org) environment variable disables color in `auto` mode. `--color=always` overrides it.
+Setting the [`NO_COLOR`](https://no-color.org) environment variable to a non-empty value disables color in `auto` mode (an empty `NO_COLOR=` is ignored). `--color=always` overrides it.
 
 ### Output and exit status
 
 - `Updated branch ...`, `Switched to branch ...` and `Deleted branch ...` (`Would update branch ...`, `Would switch to branch ...` and `Would delete branch ...` with `--dry-run`) go to **stdout**.
-- Warnings, errors and `--verbose` logs go to **stderr**.
-- The exit status is `0` on success, including when branches were skipped with a warning, and `1` when gh-sync could not run (not a git repository, no remote, fetch failed) or an update or deletion failed.
+- Warnings, errors, `--verbose` logs and git's fetch progress go to **stderr**. A failing git command's message is printed once, inside the warning or error.
+- The exit status is `0` on success, including when branches were skipped with a warning, and `1` when gh-sync could not run (an unexpected argument, not a git repository, no remote, fetch failed) or an update or deletion failed.
 
 ```console
 $ gh sync --verbose
