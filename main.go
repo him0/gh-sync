@@ -75,12 +75,16 @@ func newColorConfig(enabled bool) colorConfig {
 //
 // findMergedPRs looks up merged pull requests for gone branches whose commits
 // are not in the default branch (squash or rebase merges). Tests stub it.
+//
+// sshHosts caches the host names resolved with `ssh -G`, so ssh runs at most
+// once per host per sync.
 type runConfig struct {
 	stdoutColors  colorConfig
 	stderrColors  colorConfig
 	verbose       bool
 	dryRun        bool
 	findMergedPRs mergedPRFinder
+	sshHosts      map[string]string
 }
 
 // mergedPR is a merged pull request and the commit its head pointed to.
@@ -168,6 +172,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		verbose:       verbose,
 		dryRun:        dryRun,
 		findMergedPRs: findMergedPRs,
+		sshHosts:      make(map[string]string),
 	}
 
 	if err := checkGitRepo(); err != nil {
@@ -811,6 +816,7 @@ func findMergedPRsWithGh(cfg runConfig, remote Remote, base string, heads []stri
 	if err != nil {
 		return nil, err
 	}
+	repo.host = resolveGitHubHost(cfg, remote.URL, repo.host)
 	query, vars := buildMergedPRQuery(repo, base, heads)
 	args := []string{"api", "graphql", "--hostname", repo.host, "-F", "query=@-"}
 	for _, v := range vars {
@@ -931,6 +937,78 @@ func parseGitHubURL(raw string) (gitHubRepo, error) {
 		return gitHubRepo{}, fmt.Errorf("not a GitHub repository URL: %q", raw)
 	}
 	return gitHubRepo{host: host, owner: parts[0], name: parts[1]}, nil
+}
+
+// sshTimeout bounds `ssh -G`, which only reads the SSH config.
+const sshTimeout = 5 * time.Second
+
+// resolveGitHubHost returns the host to pass to gh for a remote whose URL
+// names host. For an SSH remote the host may be an alias from ~/.ssh/config
+// (Host github-work / HostName github.com) or ssh.github.com (SSH over port
+// 443), neither of which gh has credentials for, so the real host name is
+// read from `ssh -G`. Other remotes, and SSH remotes ssh can't resolve, keep
+// host.
+func resolveGitHubHost(cfg runConfig, rawURL, host string) string {
+	if !isSSHURL(rawURL) {
+		return host
+	}
+	if resolved, ok := cfg.sshHosts[host]; ok {
+		return resolved
+	}
+	var out []byte
+	var err error
+	if strings.HasPrefix(host, "-") {
+		// Never let a host name be read as an ssh option.
+		err = fmt.Errorf("invalid host %q", host)
+	} else {
+		args := []string{"-G", "--", host}
+		verboseLog(cfg, "ssh", args)
+		ctx, cancel := context.WithTimeout(context.Background(), sshTimeout)
+		out, err = exec.CommandContext(ctx, "ssh", args...).Output()
+		cancel()
+	}
+	if err != nil && cfg.verbose {
+		fmt.Fprintf(os.Stderr, "note: couldn't resolve SSH host '%s': %s\n", host, err.Error())
+	}
+	resolved := sshResolvedHost(host, out, err)
+	if cfg.sshHosts != nil {
+		cfg.sshHosts[host] = resolved
+	}
+	return resolved
+}
+
+// sshResolvedHost picks the GitHub host from the output of `ssh -G <host>`:
+// its hostname line, or host itself when ssh failed or printed none.
+// ssh.github.com is mapped to github.com.
+func sshResolvedHost(host string, sshOutput []byte, sshErr error) string {
+	resolved := host
+	if sshErr == nil {
+		for line := range strings.Lines(string(sshOutput)) {
+			key, value, ok := strings.Cut(strings.TrimSpace(line), " ")
+			if ok && strings.EqualFold(key, "hostname") && value != "" {
+				resolved = value
+				break
+			}
+		}
+	}
+	if strings.EqualFold(resolved, "ssh.github.com") {
+		return "github.com"
+	}
+	return resolved
+}
+
+// isSSHURL reports whether a remote URL uses SSH: ssh:// (or git+ssh://,
+// ssh+git://) or the scp-like form host:path.
+func isSSHURL(raw string) bool {
+	if scheme, _, ok := strings.Cut(raw, "://"); ok {
+		switch scheme {
+		case "ssh", "git+ssh", "ssh+git":
+			return true
+		}
+		return false
+	}
+	m := scpLikeURLRe.FindStringSubmatch(raw)
+	return m != nil && len(m[1]) > 1
 }
 
 func hasRemoteBranch(remoteBranch string) bool {
