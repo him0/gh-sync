@@ -444,9 +444,12 @@ func processBranch(cfg runConfig, branch string, remote *Remote, branchToRemote 
 	if branch == *currentBranch {
 		if cfg.dryRun {
 			fmt.Printf("Would switch to branch %s.\n", defaultBranch)
-		} else if err := runGitSilent(cfg, "checkout", "--quiet", defaultBranch); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: couldn't checkout '%s': %s\n", defaultBranch, err.Error())
-			return err
+		} else {
+			if err := runGitSilent(cfg, "checkout", "--quiet", defaultBranch); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: couldn't checkout '%s': %s\n", defaultBranch, err.Error())
+				return err
+			}
+			fmt.Printf("Switched to branch %s.\n", defaultBranch)
 		}
 		// In dry-run mode only the in-memory value changes, so later branches
 		// are evaluated as they would be in a real run; HEAD is not touched.

@@ -65,7 +65,7 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 
 - merge、rebase、強制更新、push は一切しません。ローカルにしか無いコミットを持つブランチは必ずそのまま残ります。
 - ブランチを削除するのは、main remote 上のブランチを追跡していて、そのブランチが消えており、かつリモートのデフォルトブランチに無いコミットを持たない場合だけです。upstream を一度も設定していないブランチは削除しません。
-- 削除対象のブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替えます。
+- 削除対象のブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替え、`Switched to branch ...` と表示します。
 - 別の worktree でチェックアウトされているブランチは動かしません。
 
 知っておくとよい点が 2 つあります。
@@ -91,7 +91,7 @@ gh-sync が行うのは、ブランチを前に進めることと、完全にマ
 
 ### 出力と終了ステータス
 
-- `Updated branch ...` と `Deleted branch ...`(`--dry-run` では `Would update branch ...`、`Would switch to branch ...`、`Would delete branch ...`)は **stdout** に出力されます。
+- `Updated branch ...`、`Switched to branch ...`、`Deleted branch ...`(`--dry-run` では `Would update branch ...`、`Would switch to branch ...`、`Would delete branch ...`)は **stdout** に出力されます。
 - 警告、エラー、`--verbose` のログは **stderr** に出力されます。
 - 終了ステータスは、成功時(警告を出してブランチをスキップした場合を含む)が `0`、実行できなかったとき(git リポジトリではない、remote が無い、fetch に失敗した)や更新・削除に失敗したときが `1` です。
 

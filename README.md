@@ -65,7 +65,7 @@ gh-sync only ever moves branches forward or removes ones that are fully merged:
 
 - It never merges, rebases, force-updates or pushes. A branch with local-only commits is always left as is.
 - A branch is deleted only when it tracked a branch on the main remote, that branch is gone, and the local branch has no commits missing from the remote default branch. Branches that never had an upstream are never deleted.
-- If the branch being deleted is checked out, gh-sync switches to the default branch first.
+- If the branch being deleted is checked out, gh-sync switches to the default branch first and reports it as `Switched to branch ...`.
 - A branch checked out in another worktree is not moved.
 
 Two things worth knowing:
@@ -91,7 +91,7 @@ Setting the [`NO_COLOR`](https://no-color.org) environment variable disables col
 
 ### Output and exit status
 
-- `Updated branch ...` and `Deleted branch ...` (`Would update branch ...`, `Would switch to branch ...` and `Would delete branch ...` with `--dry-run`) go to **stdout**.
+- `Updated branch ...`, `Switched to branch ...` and `Deleted branch ...` (`Would update branch ...`, `Would switch to branch ...` and `Would delete branch ...` with `--dry-run`) go to **stdout**.
 - Warnings, errors and `--verbose` logs go to **stderr**.
 - The exit status is `0` on success, including when branches were skipped with a warning, and `1` when gh-sync could not run (not a git repository, no remote, fetch failed) or an update or deletion failed.
 
