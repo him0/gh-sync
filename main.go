@@ -281,12 +281,16 @@ func getDefaultBranch(remote *Remote) (string, error) {
 	return "", fmt.Errorf("could not determine default branch (no remote HEAD, no main, no master on %s); set it with `git remote set-head %s --auto`", remote.Name, remote.Name)
 }
 
+// getCurrentBranch returns the name of the checked-out branch. It strips
+// "refs/heads/" itself rather than using `symbolic-ref --short`, which prints
+// "heads/<name>" when a tag has the same name, so the result matches the
+// names returned by getLocalBranches.
 func getCurrentBranch() (string, error) {
-	output, err := gitOutput("symbolic-ref", "--short", "HEAD")
+	output, err := gitOutput("symbolic-ref", "HEAD")
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(output)), nil
+	return strings.TrimPrefix(strings.TrimSpace(string(output)), "refs/heads/"), nil
 }
 
 // configRemoteRe matches lines from `git config --get-regexp branch\..*\.remote`.
