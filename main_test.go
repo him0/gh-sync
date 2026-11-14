@@ -1076,3 +1076,462 @@ func TestParseFetchRemoteLine(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests for issue #65: behavior promised by the README that was not pinned
+// down by a test.
+// ---------------------------------------------------------------------------
+
+// assertBranchAt fails the test unless local branch exists and points at want.
+func (f *syncFixture) assertBranchAt(branch, want string) {
+	f.t.Helper()
+	if !f.localBranchExists(branch) {
+		f.t.Errorf("local branch %s was deleted", branch)
+		return
+	}
+	if got := f.sha(f.local, branch); got != want {
+		f.t.Errorf("local %s = %s, want unchanged %s", branch, got, want)
+	}
+}
+
+// mergeIntoUpstreamMain fast-forwards main to branch on upstream and pushes
+// it, as merging a pull request does.
+func (f *syncFixture) mergeIntoUpstreamMain(branch string) {
+	f.t.Helper()
+	f.upstreamGit("merge", "--quiet", "--ff-only", branch)
+	f.upstreamGit("push", "--quiet", "origin", "main")
+}
+
+// TestRunIgnoresBranchWithoutRemoteCounterpart checks the Safety promise that
+// branches that never had an upstream are never deleted: a local-only branch
+// (no upstream config, no same-named branch on the main remote) is left
+// untouched and silent, even when it is fully merged into the default branch.
+func TestRunIgnoresBranchWithoutRemoteCounterpart(t *testing.T) {
+	f := newSyncFixture(t)
+	// local-only points at main, so every commit is in origin/main and the
+	// deletion path would consider it merged.
+	f.localGit("branch", "--no-track", "local-only", "main")
+	before := f.sha(f.local, "local-only")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	if res.stdout != "" {
+		t.Errorf("stdout = %q, want empty", res.stdout)
+	}
+	if res.stderr != "" {
+		t.Errorf("stderr = %q, want empty", res.stderr)
+	}
+	f.assertBranchAt("local-only", before)
+}
+
+// TestRunIgnoresBranchTrackingOtherRemote checks that a branch tracking a
+// remote other than the main remote, with no same-named branch on the main
+// remote, is neither updated nor deleted, even though its own upstream has
+// moved and it is fully merged into the main remote's default branch.
+func TestRunIgnoresBranchTrackingOtherRemote(t *testing.T) {
+	f := newSyncFixture(t)
+	// A second remote "fork" with a branch "topic" that exists only there.
+	fork := filepath.Join(t.TempDir(), "fork.git")
+	f.gitIn(f.upstream, "clone", "--quiet", "--bare", f.remote, fork)
+	f.upstreamGit("remote", "add", "fork", fork)
+	f.upstreamGit("push", "--quiet", "fork", "main:topic")
+	f.localGit("remote", "add", "fork", fork)
+	f.localGit("fetch", "--quiet", "fork")
+	f.localGit("branch", "--quiet", "--track", "topic", "fork/topic")
+	before := f.sha(f.local, "topic")
+	// Move fork/topic forward, so a sync against the fork would fast-forward.
+	f.upstreamGit("checkout", "--quiet", "-b", "topic")
+	f.commit(f.upstream, "topic-1")
+	f.upstreamGit("push", "--quiet", "fork", "topic")
+	f.upstreamGit("checkout", "--quiet", "main")
+	// gh-sync fetches only the main remote; fetch the fork here so the moved
+	// fork/topic is visible locally.
+	f.localGit("fetch", "--quiet", "fork")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	assertNotContains(t, "stdout", res.stdout, "topic")
+	assertNotContains(t, "stderr", res.stderr, "topic")
+	f.assertBranchAt("topic", before)
+}
+
+// TestRunSkipsBrokenUpstreamConfig checks that a branch whose
+// branch.<name>.remote is the main remote but whose branch.<name>.merge is
+// missing or invalid is skipped with a warning while the same-named remote
+// branch still exists. It must neither be fast-forwarded (the remote branch
+// moved) nor deleted (it is fully merged into the default branch).
+func TestRunSkipsBrokenUpstreamConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		breakConfig func(f *syncFixture)
+	}{
+		{"merge missing", func(f *syncFixture) {
+			f.localGit("config", "--unset", "branch.feature.merge")
+		}},
+		{"merge invalid", func(f *syncFixture) {
+			f.localGit("config", "branch.feature.merge", "not-a-ref")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushUpstreamBranch("feature", "feature-1")
+			f.trackRemoteBranch("feature")
+			before := f.sha(f.local, "feature")
+			// feature is merged into main, then moves on remotely: a working
+			// config would fast-forward it, a "gone" verdict would delete it.
+			f.mergeIntoUpstreamMain("feature")
+			f.advanceUpstream("feature", "feature-2")
+			tt.breakConfig(f)
+
+			res := f.sync()
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			assertContains(t, "stderr", res.stderr, "warning: 'feature' upstream config is broken; skipping")
+			assertNotContains(t, "stdout", res.stdout, "branch feature")
+			f.assertBranchAt("feature", before)
+		})
+	}
+}
+
+// TestRunFastForwardsByNameWithoutUpstreamConfig checks that a branch with no
+// upstream config is fast-forwarded to the same-named branch on the main
+// remote, and that --verbose (only) prints a note about the name match.
+func TestRunFastForwardsByNameWithoutUpstreamConfig(t *testing.T) {
+	note := "note: 'feature' has no upstream config; matching by name against origin/feature"
+	for _, verbose := range []bool{false, true} {
+		t.Run(fmt.Sprintf("verbose=%v", verbose), func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushUpstreamBranch("feature", "feature-1")
+			f.localGit("fetch", "--quiet", "origin")
+			f.localGit("branch", "--no-track", "feature", "origin/feature")
+			before := f.sha(f.local, "feature")
+			f.advanceUpstream("feature", "feature-2")
+
+			var res syncResult
+			if verbose {
+				res = f.sync("--verbose")
+			} else {
+				res = f.sync()
+			}
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch feature (was %s).", shortSHA(before)))
+			if verbose {
+				assertContains(t, "stderr", res.stderr, note)
+			} else {
+				assertNotContains(t, "stderr", res.stderr, "note:")
+			}
+			if got, want := f.sha(f.local, "feature"), f.sha(f.upstream, "feature"); got != want {
+				t.Errorf("local feature = %s, want %s", got, want)
+			}
+		})
+	}
+}
+
+// TestRunDeleteFailures checks that when deleting a merged, gone branch
+// fails, a warning is printed, run() returns an error and the branch is kept.
+func TestRunDeleteFailures(t *testing.T) {
+	// setup creates a merged, gone branch "feature" whose commit adds file f.
+	setup := func(t *testing.T) (*syncFixture, string) {
+		f := newSyncFixture(t)
+		f.upstreamGit("checkout", "--quiet", "-b", "feature")
+		if err := os.WriteFile(filepath.Join(f.upstream, "f"), []byte("feature\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		f.upstreamGit("add", "f")
+		f.commit(f.upstream, "add f")
+		f.upstreamGit("push", "--quiet", "-u", "origin", "feature")
+		f.upstreamGit("checkout", "--quiet", "main")
+		f.trackRemoteBranch("feature")
+		f.mergeIntoUpstreamMain("feature")
+		f.deleteRemoteBranch("feature")
+		return f, f.sha(f.local, "feature")
+	}
+
+	// The checked-out branch is deleted only after switching to the default
+	// branch. A local change to f (which local main does not have yet) makes
+	// that checkout fail, so the branch must not be deleted.
+	t.Run("checkout fails", func(t *testing.T) {
+		f, before := setup(t)
+		f.localGit("checkout", "--quiet", "feature")
+		if err := os.WriteFile(filepath.Join(f.local, "f"), []byte("local change\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		res := f.sync()
+		if res.err == nil {
+			t.Fatal("run() error = nil, want an error")
+		}
+		assertContains(t, "stderr", res.stderr, "warning: couldn't checkout 'main':")
+		assertContains(t, "stderr", res.stderr, "would be overwritten by checkout")
+		assertNotContains(t, "stdout", res.stdout, "Switched to branch")
+		assertNotContains(t, "stdout", res.stdout, "Deleted branch feature")
+		f.assertBranchAt("feature", before)
+		if f.currentBranch() != "feature" {
+			t.Errorf("current branch = %q, want feature", f.currentBranch())
+		}
+	})
+
+	// git refuses to delete a branch checked out in another worktree.
+	t.Run("branch -D fails", func(t *testing.T) {
+		f, before := setup(t)
+		f.localGit("worktree", "add", "--quiet", filepath.Join(t.TempDir(), "wt"), "feature")
+
+		res := f.sync()
+		if res.err == nil {
+			t.Fatal("run() error = nil, want an error")
+		}
+		assertContains(t, "stderr", res.stderr, "warning: couldn't delete 'feature':")
+		assertNotContains(t, "stdout", res.stdout, "Deleted branch feature")
+		f.assertBranchAt("feature", before)
+	})
+}
+
+// TestRunStartupErrors checks that errors before any branch is processed are
+// printed to stderr, make run() return an error, and print nothing to stdout.
+func TestRunStartupErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T)
+		args  []string
+		want  string
+	}{
+		{
+			name: "not a git repository",
+			setup: func(t *testing.T) {
+				dir := t.TempDir()
+				// Keep git from finding a repository above the temp dir.
+				t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(dir))
+				t.Chdir(dir)
+			},
+			want: "fatal: Not a git repository",
+		},
+		{
+			name:  "no remotes",
+			setup: func(t *testing.T) { t.Chdir(setupTestRepo(t)) },
+			want:  "no git remotes found",
+		},
+		{
+			name: "fetch fails",
+			setup: func(t *testing.T) {
+				dir := setupTestRepo(t)
+				t.Chdir(dir)
+				missing := filepath.Join(t.TempDir(), "missing.git")
+				cmd := exec.Command("git", "remote", "add", "origin", missing)
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git remote add failed: %v\n%s", err, out)
+				}
+			},
+			want: "Failed to fetch from origin: ",
+		},
+		{
+			name:  "invalid --color",
+			setup: func(t *testing.T) { newSyncFixture(t) },
+			args:  []string{"--color=bogus"},
+			want:  `fatal: invalid --color value: "bogus" (must be one of: always, never, auto)`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.setup(t)
+			// sync only uses f.t, so a bare fixture runs run() in whatever
+			// directory setup chose.
+			res := (&syncFixture{t: t}).sync(tt.args...)
+			if res.err == nil {
+				t.Fatal("run() error = nil, want an error")
+			}
+			assertContains(t, "stderr", res.stderr, tt.want)
+			if res.stdout != "" {
+				t.Errorf("stdout = %q, want empty", res.stdout)
+			}
+		})
+	}
+}
+
+// TestGetMainRemotePriority checks the main remote is picked from upstream,
+// github, origin in that order, falling back to the first remote git lists
+// (`git remote -v` sorts by name).
+func TestGetMainRemotePriority(t *testing.T) {
+	tests := []struct {
+		remotes []string // in the order they are added
+		want    string
+	}{
+		{[]string{"origin", "github", "upstream", "aaa"}, "upstream"},
+		{[]string{"origin", "github", "aaa"}, "github"},
+		{[]string{"zzz", "origin", "aaa"}, "origin"},
+		{[]string{"zeta", "alpha"}, "alpha"},
+	}
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.remotes, ","), func(t *testing.T) {
+			dir := setupTestRepo(t)
+			t.Chdir(dir)
+			for _, name := range tt.remotes {
+				cmd := exec.Command("git", "remote", "add", name, filepath.Join(t.TempDir(), name+".git"))
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git remote add %s failed: %v\n%s", name, err, out)
+				}
+			}
+			got, err := getMainRemote()
+			if err != nil {
+				t.Fatalf("getMainRemote() error: %v", err)
+			}
+			if got.Name != tt.want {
+				t.Errorf("getMainRemote() = %q, want %q", got.Name, tt.want)
+			}
+		})
+	}
+}
+
+// TestGetDefaultBranchFallsBackToMaster checks that without a remote HEAD,
+// master is used when main does not exist, and main is preferred when both do.
+func TestGetDefaultBranchFallsBackToMaster(t *testing.T) {
+	tests := []struct {
+		refs []string
+		want string
+	}{
+		{[]string{"master"}, "master"},
+		{[]string{"master", "main"}, "main"},
+	}
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.refs, ","), func(t *testing.T) {
+			dir := setupTestRepo(t)
+			t.Chdir(dir)
+			for _, ref := range tt.refs {
+				cmd := exec.Command("git", "update-ref", "refs/remotes/testremote/"+ref, "HEAD")
+				if out, err := cmd.CombinedOutput(); err != nil {
+					t.Fatalf("git update-ref failed: %v\n%s", err, out)
+				}
+			}
+			got, err := getDefaultBranch(&Remote{Name: "testremote"})
+			if err != nil {
+				t.Fatalf("getDefaultBranch() error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("getDefaultBranch() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRunColorAlways checks that --color=always wraps the branch name of
+// "Updated branch" / "Deleted branch" and error messages in ANSI escapes, and
+// that --color=never emits none. Output is not a terminal here, so this also
+// shows that "always" does not depend on terminal detection.
+func TestRunColorAlways(t *testing.T) {
+	setup := func(t *testing.T) (*syncFixture, string, string) {
+		f := newSyncFixture(t)
+		mainBefore := f.sha(f.local, "main")
+		f.pushUpstreamBranch("feature", "feature-1")
+		f.trackRemoteBranch("feature")
+		featureBefore := f.sha(f.local, "feature")
+		f.mergeIntoUpstreamMain("feature")
+		f.deleteRemoteBranch("feature")
+		return f, mainBefore, featureBefore
+	}
+
+	t.Run("always", func(t *testing.T) {
+		f, mainBefore, featureBefore := setup(t)
+		res := f.sync("--color=always")
+		if res.err != nil {
+			t.Fatalf("run() error: %v", res.err)
+		}
+		assertContains(t, "stdout", res.stdout, fmt.Sprintf("\033[32mUpdated branch \033[32;1mmain\033[0m (was %s).\n", shortSHA(mainBefore)))
+		assertContains(t, "stdout", res.stdout, fmt.Sprintf("\033[31mDeleted branch \033[31;1mfeature\033[0m (was %s).\n", shortSHA(featureBefore)))
+	})
+
+	t.Run("never", func(t *testing.T) {
+		f, mainBefore, featureBefore := setup(t)
+		res := f.sync("--color=never")
+		if res.err != nil {
+			t.Fatalf("run() error: %v", res.err)
+		}
+		assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch main (was %s).\n", shortSHA(mainBefore)))
+		assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature (was %s).\n", shortSHA(featureBefore)))
+		assertNotContains(t, "stdout", res.stdout, "\033[")
+	})
+
+	for _, tt := range []struct {
+		flag string
+		want string
+	}{
+		{"always", "\033[31;1mno git remotes found\033[0m\n"},
+		{"never", "no git remotes found\n"},
+	} {
+		t.Run("error/"+tt.flag, func(t *testing.T) {
+			t.Chdir(setupTestRepo(t))
+			// sync only uses f.t; run() fails before needing a remote.
+			res := (&syncFixture{t: t}).sync("--color=" + tt.flag)
+			if res.err == nil {
+				t.Fatal("run() error = nil, want an error")
+			}
+			if res.stderr != tt.want {
+				t.Errorf("stderr = %q, want %q", res.stderr, tt.want)
+			}
+		})
+	}
+}
+
+// mainExitArgsEnv carries the arguments for main() when the test binary
+// re-executes itself in TestMainExitCode (one argument per line).
+const mainExitArgsEnv = "GH_SYNC_TEST_MAIN_ARGS"
+
+// TestMainExitCode checks the exit status of the real main(): 0 on success
+// and for --help, 1 on errors. main() calls os.Exit, so it is run in a child
+// process: the test binary re-executes itself with mainExitArgsEnv set, and
+// the child calls main() instead of running the test.
+func TestMainExitCode(t *testing.T) {
+	if args, ok := os.LookupEnv(mainExitArgsEnv); ok {
+		os.Args = []string{"gh-sync"}
+		if args != "" {
+			os.Args = append(os.Args, strings.Split(args, "\n")...)
+		}
+		main()
+		// main() returned, which is how it reports success.
+		os.Exit(0)
+	}
+
+	tests := []struct {
+		name  string
+		args  []string
+		setup func(t *testing.T) string // returns the directory to run in
+		want  int
+	}{
+		{"sync succeeds", []string{"--color=never"}, func(t *testing.T) string {
+			f := newSyncFixture(t)
+			f.advanceUpstream("main", "upstream-1")
+			return f.local
+		}, 0},
+		{"--help", []string{"--help"}, func(t *testing.T) string { return setupTestRepo(t) }, 0},
+		{"--version", []string{"--version"}, func(t *testing.T) string { return setupTestRepo(t) }, 0},
+		{"no remotes", []string{"--color=never"}, func(t *testing.T) string { return setupTestRepo(t) }, 1},
+		{"unknown flag", []string{"--bogus"}, func(t *testing.T) string { return setupTestRepo(t) }, 1},
+		{"invalid --color", []string{"--color=bogus"}, func(t *testing.T) string { return setupTestRepo(t) }, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := tt.setup(t)
+			cmd := exec.Command(os.Args[0], "-test.run=^TestMainExitCode$")
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), mainExitArgsEnv+"="+strings.Join(tt.args, "\n"))
+			out, err := cmd.CombinedOutput()
+			got := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatalf("running main() failed: %v", err)
+				}
+				got = exitErr.ExitCode()
+			}
+			if got != tt.want {
+				t.Errorf("exit status = %d, want %d\noutput:\n%s", got, tt.want, out)
+			}
+		})
+	}
+}
