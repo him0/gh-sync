@@ -220,7 +220,9 @@ Options:
 `
 
 func printUsage(w io.Writer) {
-	fmt.Fprint(w, usageText)
+	// Like the other writes to stdout/stderr, a failed write has nowhere
+	// better to be reported.
+	_, _ = fmt.Fprint(w, usageText)
 }
 
 // isTerminal reports whether fd is a terminal, including the MSYS2 / Cygwin
