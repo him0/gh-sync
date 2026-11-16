@@ -988,6 +988,7 @@ func TestRunWarnsOnUnpushedCommits(t *testing.T) {
 			}
 			assertContains(t, "stderr", res.stderr, "warning: 'main' seems to contain unpushed commits")
 			assertNotContains(t, "stdout", res.stdout, "Updated branch main")
+			assertNotContains(t, "stdout", res.stdout, "Already up to date.")
 			if got := f.sha(f.local, "main"); got != before {
 				t.Errorf("local main = %s, want unchanged %s", got, before)
 			}
@@ -1024,29 +1025,34 @@ func TestRunColorsWarnings(t *testing.T) {
 
 // TestRunUpToDateIsNoop checks that up-to-date branches, and a local-only
 // branch (no upstream, no same-named remote branch) that is fully merged, are
-// left alone silently: branches that never had an upstream are never deleted.
+// left alone and reported as up to date: branches that never had an upstream
+// are never deleted.
 func TestRunUpToDateIsNoop(t *testing.T) {
-	f := newSyncFixture(t)
-	f.pushUpstreamBranch("feature", "feature-1")
-	f.trackRemoteBranch("feature")
-	f.localGit("branch", "--no-track", "local-only", "main")
-	before := make(map[string]string)
-	for _, b := range []string{"main", "feature", "local-only"} {
-		before[b] = f.sha(f.local, b)
-	}
+	for _, args := range [][]string{nil, {"--dry-run"}} {
+		t.Run(strings.Join(append([]string{"args"}, args...), " "), func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushUpstreamBranch("feature", "feature-1")
+			f.trackRemoteBranch("feature")
+			f.localGit("branch", "--no-track", "local-only", "main")
+			before := make(map[string]string)
+			for _, b := range []string{"main", "feature", "local-only"} {
+				before[b] = f.sha(f.local, b)
+			}
 
-	res := f.sync()
-	if res.err != nil {
-		t.Fatalf("run() error: %v", res.err)
-	}
-	if res.stdout != "" {
-		t.Errorf("stdout = %q, want empty", res.stdout)
-	}
-	if res.stderr != "" {
-		t.Errorf("stderr = %q, want empty", res.stderr)
-	}
-	for b, sha := range before {
-		f.assertBranchAt(b, sha)
+			res := f.sync(args...)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			if res.stdout != "Already up to date.\n" {
+				t.Errorf("stdout = %q, want %q", res.stdout, "Already up to date.\n")
+			}
+			if res.stderr != "" {
+				t.Errorf("stderr = %q, want empty", res.stderr)
+			}
+			for b, sha := range before {
+				f.assertBranchAt(b, sha)
+			}
+		})
 	}
 }
 

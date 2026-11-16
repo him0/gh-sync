@@ -59,6 +59,8 @@ gh sync
 | Upstream deleted, otherwise | Kept: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
 | Up to date, or no counterpart on the remote | Nothing |
 
+When no branch was updated or deleted and no warning was printed, gh-sync prints `Already up to date.`
+
 ### Safety
 
 - gh-sync never merges, rebases, force-updates or pushes. A branch with local-only commits is always kept.
@@ -98,7 +100,7 @@ Patterns are matched against the whole branch name with Go's [`path.Match`](http
 
 Updated branches are green, deleted ones red, warnings yellow and errors bold red. With `--color=auto`, stdout and stderr are each colorized only when they are a terminal, and a non-empty [`NO_COLOR`](https://no-color.org) disables color.
 
-Branch updates, deletions and switches go to stdout; warnings, errors, `--verbose` output and fetch progress go to stderr. The exit status is `1` when gh-sync could not run or an update, deletion or fetch failed, and `0` otherwise, including when branches were skipped with a warning.
+Branch updates, deletions, switches and `Already up to date.` go to stdout; warnings, errors, `--verbose` output and fetch progress go to stderr. The exit status is `1` when gh-sync could not run or an update, deletion or fetch failed, and `0` otherwise, including when branches were skipped with a warning.
 
 ## Troubleshooting
 
