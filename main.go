@@ -79,6 +79,9 @@ func newColorConfig(enabled bool) colorConfig {
 //
 // sshHosts caches the host names resolved with `ssh -G`, so ssh runs at most
 // once per host per sync.
+//
+// report records what was printed, so run() can tell whether the sync left
+// everything as it was.
 type runConfig struct {
 	stdoutColors  colorConfig
 	stderrColors  colorConfig
@@ -86,6 +89,13 @@ type runConfig struct {
 	dryRun        bool
 	findMergedPRs mergedPRFinder
 	sshHosts      map[string]string
+	report        *syncReport
+}
+
+// syncReport is shared by every copy of a runConfig.
+type syncReport struct {
+	changed bool // a branch update, deletion or switch was printed
+	warned  bool // a warning was printed
 }
 
 // mergedPR is a merged pull request and the commit its head pointed to.
@@ -174,6 +184,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		dryRun:        dryRun,
 		findMergedPRs: findMergedPRs,
 		sshHosts:      make(map[string]string),
+		report:        &syncReport{},
 	}
 
 	if err := checkGitRepo(); err != nil {
@@ -218,7 +229,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 	failed := make(map[string]bool)
 	for _, r := range trackedRemotes(remotes, remote.Name, branchToRemote) {
 		if err := fetchRemote(cfg, r, stderrIsTerminal); err != nil {
-			printWarning(cfg.stderrColors, "couldn't fetch %s; skipping the branches that track it: %s", r, err.Error())
+			printWarning(cfg, "couldn't fetch %s; skipping the branches that track it: %s", r, err.Error())
 			failed[r] = true
 			hadFailure = true
 			continue
@@ -263,7 +274,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		for _, c := range candidates {
 			pr := merged[c.branch]
 			if pr == 0 {
-				printWarning(cfg.stderrColors, "'%s' was deleted on %s, but appears not merged into '%s'", c.branch, branchToRemote[c.branch], defaultBranch)
+				printWarning(cfg, "'%s' was deleted on %s, but appears not merged into '%s'", c.branch, branchToRemote[c.branch], defaultBranch)
 				continue
 			}
 			if derr := deleteBranch(cfg, c.branch, c.tip, c.worktreePath, fmt.Sprintf(", merged via #%d", pr), &currentBranch, remote.Name, defaultBranch); derr != nil {
@@ -274,6 +285,11 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 
 	if hadFailure {
 		return fmt.Errorf("one or more branches failed to sync")
+	}
+	// stdout lists only what changed, so scripts can test it for emptiness.
+	// The message is for someone at a terminal, like fetch progress.
+	if stderrIsTerminal && !cfg.report.changed && !cfg.report.warned {
+		fmt.Fprintln(os.Stderr, "Already up to date.")
 	}
 	return nil
 }
@@ -728,7 +744,7 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 			// upstream points at broken config rather than a deleted branch:
 			// skip it, so a config typo can't lead to deleting it below.
 			if remoteRefs[trackedSameName] {
-				printWarning(cfg.stderrColors, "'%s' upstream config is broken; skipping", branch)
+				printWarning(cfg, "'%s' upstream config is broken; skipping", branch)
 				return nil
 			}
 			if b.upstream == "" {
@@ -760,7 +776,7 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 			var err error
 			ahead, behind, err = getCommitDifference(fullBranch, remoteBranch)
 			if err != nil {
-				printWarning(cfg.stderrColors, "couldn't compare '%s' against '%s': %s", branch, remoteBranch, err.Error())
+				printWarning(cfg, "couldn't compare '%s' against '%s': %s", branch, remoteBranch, err.Error())
 				return err
 			}
 		}
@@ -771,11 +787,11 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 			oldCommit := b.tip
 			if inOtherWorktree(branch, b.worktreePath, *currentBranch) {
 				// git refuses to move it; say why instead of failing.
-				printWarning(cfg.stderrColors, "'%s' is checked out in another worktree (%s); not updated", branch, b.worktreePath)
+				printWarning(cfg, "'%s' is checked out in another worktree (%s); not updated", branch, b.worktreePath)
 				return nil
 			}
 			if cfg.dryRun {
-				fmt.Printf("%sWould update branch %s%s%s (was %s).\n", cfg.stdoutColors.green, cfg.stdoutColors.lightGreen, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
+				printChange(cfg, "%sWould update branch %s%s%s (was %s).\n", cfg.stdoutColors.green, cfg.stdoutColors.lightGreen, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
 				return nil
 			}
 			var updateErr error
@@ -788,12 +804,12 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 				updateErr = runGitSilent(cfg, "branch", "-f", branch, remoteBranch)
 			}
 			if updateErr != nil {
-				printWarning(cfg.stderrColors, "couldn't fast-forward '%s': %s", branch, updateErr.Error())
+				printWarning(cfg, "couldn't fast-forward '%s': %s", branch, updateErr.Error())
 				return updateErr
 			}
-			fmt.Printf("%sUpdated branch %s%s%s (was %s).\n", cfg.stdoutColors.green, cfg.stdoutColors.lightGreen, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
+			printChange(cfg, "%sUpdated branch %s%s%s (was %s).\n", cfg.stdoutColors.green, cfg.stdoutColors.lightGreen, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
 		default:
-			printWarning(cfg.stderrColors, "'%s' seems to contain unpushed commits", branch)
+			printWarning(cfg, "'%s' seems to contain unpushed commits", branch)
 		}
 		return nil
 	}
@@ -804,7 +820,7 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 
 	ahead, _, err := getCommitDifference(fullBranch, fullDefaultBranch)
 	if err != nil {
-		printWarning(cfg.stderrColors, "couldn't compare '%s' against '%s': %s", branch, fullDefaultBranch, err.Error())
+		printWarning(cfg, "couldn't compare '%s' against '%s': %s", branch, fullDefaultBranch, err.Error())
 		return err
 	}
 	if ahead != 0 {
@@ -829,32 +845,32 @@ func inOtherWorktree(branch, worktreePath, currentBranch string) bool {
 // what it would do.
 func deleteBranch(cfg runConfig, branch, oldCommit, worktreePath, reason string, currentBranch *string, remoteName, defaultBranch string) error {
 	if inOtherWorktree(branch, worktreePath, *currentBranch) {
-		printWarning(cfg.stderrColors, "'%s' is checked out in another worktree (%s); not deleted", branch, worktreePath)
+		printWarning(cfg, "'%s' is checked out in another worktree (%s); not deleted", branch, worktreePath)
 		return nil
 	}
 	if branch == *currentBranch {
 		if cfg.dryRun {
-			fmt.Printf("Would switch to branch %s.\n", defaultBranch)
+			printChange(cfg, "Would switch to branch %s.\n", defaultBranch)
 		} else {
 			if err := runGitSilent(cfg, checkoutDefaultBranchArgs(remoteName, defaultBranch)...); err != nil {
-				printWarning(cfg.stderrColors, "couldn't checkout '%s': %s", defaultBranch, err.Error())
+				printWarning(cfg, "couldn't checkout '%s': %s", defaultBranch, err.Error())
 				return err
 			}
-			fmt.Printf("Switched to branch %s.\n", defaultBranch)
+			printChange(cfg, "Switched to branch %s.\n", defaultBranch)
 		}
 		// In dry-run mode only the in-memory value changes, so later branches
 		// are evaluated as they would be in a real run; HEAD is not touched.
 		*currentBranch = defaultBranch
 	}
 	if cfg.dryRun {
-		fmt.Printf("%sWould delete branch %s%s%s (was %s%s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit), reason)
+		printChange(cfg, "%sWould delete branch %s%s%s (was %s%s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit), reason)
 		return nil
 	}
 	if err := runGitSilent(cfg, "branch", "-D", branch); err != nil {
-		printWarning(cfg.stderrColors, "couldn't delete '%s': %s", branch, err.Error())
+		printWarning(cfg, "couldn't delete '%s': %s", branch, err.Error())
 		return err
 	}
-	fmt.Printf("%sDeleted branch %s%s%s (was %s%s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit), reason)
+	printChange(cfg, "%sDeleted branch %s%s%s (was %s%s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit), reason)
 	return nil
 }
 
@@ -1257,8 +1273,16 @@ func printError(colors colorConfig, format string, args ...any) {
 
 // printWarning prints "warning: <message>" to stderr, in yellow when colors
 // are enabled.
-func printWarning(colors colorConfig, format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "%swarning: %s%s\n", colors.yellow, fmt.Sprintf(format, args...), colors.reset)
+func printWarning(cfg runConfig, format string, args ...any) {
+	cfg.report.warned = true
+	fmt.Fprintf(os.Stderr, "%swarning: %s%s\n", cfg.stderrColors.yellow, fmt.Sprintf(format, args...), cfg.stderrColors.reset)
+}
+
+// printChange prints a branch update, deletion or switch to stdout, or what
+// --dry-run would do.
+func printChange(cfg runConfig, format string, args ...any) {
+	cfg.report.changed = true
+	fmt.Printf(format, args...)
 }
 
 // printNote prints "note: <message>" to stderr with --verbose only.

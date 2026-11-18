@@ -59,6 +59,8 @@ gh sync
 | upstream が削除済みで、それ以外 | 残す: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
 | 最新、または remote に対応するブランチが無い | 何もしない |
 
+更新・削除したブランチが無く、警告も出なかった場合は、stderr が端末であれば `Already up to date.` と表示します。
+
 ### 安全性
 
 - merge、rebase、強制更新、push は一切しません。ローカルにしか無いコミットを持つブランチは必ず残ります。
@@ -98,7 +100,7 @@ gh sync --exclude='wip/*' --exclude=tmp
 
 更新したブランチは緑、削除したブランチは赤、警告は黄、エラーは太字の赤で表示します。`--color=auto` では stdout と stderr をそれぞれ端末のときだけ色付けし、空でない [`NO_COLOR`](https://no-color.org) があれば色を付けません。
 
-ブランチの更新・削除・切り替えは stdout に、警告、エラー、`--verbose` の出力、fetch の進捗は stderr に出力します。終了ステータスは、実行できなかったときや更新・削除・fetch に失敗したときは `1`、それ以外(警告を出してスキップした場合を含む)は `0` です。
+ブランチの更新・削除・切り替えは stdout に、警告、エラー、`--verbose` の出力、fetch の進捗、`Already up to date.` は stderr に出力します(最後の二つは端末のときだけ)。終了ステータスは、実行できなかったときや更新・削除・fetch に失敗したときは `1`、それ以外(警告を出してスキップした場合を含む)は `0` です。
 
 ## トラブルシューティング
 
