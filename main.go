@@ -286,8 +286,10 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 	if hadFailure {
 		return fmt.Errorf("one or more branches failed to sync")
 	}
-	if !cfg.report.changed && !cfg.report.warned {
-		fmt.Println("Already up to date.")
+	// stdout lists only what changed, so scripts can test it for emptiness.
+	// The message is for someone at a terminal, like fetch progress.
+	if stderrIsTerminal && !cfg.report.changed && !cfg.report.warned {
+		fmt.Fprintln(os.Stderr, "Already up to date.")
 	}
 	return nil
 }

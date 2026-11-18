@@ -988,7 +988,6 @@ func TestRunWarnsOnUnpushedCommits(t *testing.T) {
 			}
 			assertContains(t, "stderr", res.stderr, "warning: 'main' seems to contain unpushed commits")
 			assertNotContains(t, "stdout", res.stdout, "Updated branch main")
-			assertNotContains(t, "stdout", res.stdout, "Already up to date.")
 			if got := f.sha(f.local, "main"); got != before {
 				t.Errorf("local main = %s, want unchanged %s", got, before)
 			}
@@ -1025,8 +1024,9 @@ func TestRunColorsWarnings(t *testing.T) {
 
 // TestRunUpToDateIsNoop checks that up-to-date branches, and a local-only
 // branch (no upstream, no same-named remote branch) that is fully merged, are
-// left alone and reported as up to date: branches that never had an upstream
-// are never deleted.
+// left alone silently: branches that never had an upstream are never deleted.
+// "Already up to date." is shown only when stderr is a terminal, which it is
+// not here.
 func TestRunUpToDateIsNoop(t *testing.T) {
 	for _, args := range [][]string{nil, {"--dry-run"}} {
 		t.Run(strings.Join(append([]string{"args"}, args...), " "), func(t *testing.T) {
@@ -1043,8 +1043,8 @@ func TestRunUpToDateIsNoop(t *testing.T) {
 			if res.err != nil {
 				t.Fatalf("run() error: %v", res.err)
 			}
-			if res.stdout != "Already up to date.\n" {
-				t.Errorf("stdout = %q, want %q", res.stdout, "Already up to date.\n")
+			if res.stdout != "" {
+				t.Errorf("stdout = %q, want empty", res.stdout)
 			}
 			if res.stderr != "" {
 				t.Errorf("stderr = %q, want empty", res.stderr)
