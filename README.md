@@ -70,7 +70,7 @@ When no branch was updated or deleted, no warning was printed and no branch was 
 - A branch that is behind its merged pull request (GitHub's "Update branch", a commit pushed from elsewhere) is deleted too: all its commits are in the pull request. Only the last 100 commits of a pull request are checked, and nothing extra is fetched.
 - Merged pull requests are looked up with `gh api graphql`, one request per 50 branches. When that fails (`gh` not authenticated, a remote not on GitHub, an API error, a 30-second timeout), the branch is kept with `... and pull requests couldn't be looked up; not deleted`, and the reason is printed once as `warning: couldn't look up merged pull requests: <reason>`. SSH host aliases from `~/.ssh/config` and `ssh.github.com` are resolved with `ssh -G`.
 - If the branch to delete is checked out, gh-sync first switches to the default branch (`Switched to branch ...`), creating it from the main remote if needed.
-- A branch checked out in [another worktree](#other-worktrees) is never updated or deleted.
+- A branch checked out in [another worktree](#other-worktrees) is never updated, and is deleted only with `--remove-worktrees`, which removes its worktree first. No worktree is removed without that option, and never with `--force`.
 
 gh-sync updates **local** branches only. After syncing a fork against `upstream`, push to update the fork too (e.g. `git push origin main`).
 
@@ -82,19 +82,49 @@ git refuses to move or delete a branch that is checked out in another worktree, 
 warning: 2 merged branches are still checked out in other worktrees; not deleted:
   feature/a      .claude/worktrees/eager-wiggling-moonbeam
   feature/long   /home/me/elsewhere/wt
-hint: remove a worktree with `git worktree remove <path>`, then run gh sync again
+hint: remove a worktree with `git worktree remove <path>`, or run `gh sync --remove-worktrees` to remove the clean ones
 note: 3 branches checked out in other worktrees are behind their upstream; not updated
 ```
 
 - The warning lists the branches that would have been deleted. A worktree inside the main worktree is shown relative to it, any other with its absolute path.
 - The note counts the branches that would have been fast-forwarded; `--verbose` lists them the same way. Update one with `git pull --ff-only` in its worktree.
 
+#### Removing worktrees
+
+With `--remove-worktrees`, or `git config gh-sync.removeWorktrees true`, gh-sync removes the worktree of a branch it is about to delete with `git worktree remove`, then deletes the branch:
+
+```console
+Removed worktree .claude/worktrees/eager-wiggling-moonbeam.
+Deleted branch feature/a (was 1a2b3c4, merged via #12).
+```
+
+A worktree git refuses to remove is kept with its branch, and the exit status stays `0`:
+
+```console
+warning: 'feature/b' is checked out in .claude/worktrees/calm-river, which has modified or untracked files; not deleted
+warning: 'feature/c' is checked out in /home/me/elsewhere/wt, which is locked; not deleted
+```
+
+Any other refusal, such as a worktree with submodules, is reported as `..., which couldn't be removed: <git's message>; not deleted`.
+
+It is off by default because of what it can't protect:
+
+- **Ignored files are deleted without asking.** git only refuses for modified or untracked files, so an ignored `.env` or build output in the worktree is lost.
+- **gh-sync can't tell whether a shell or an agent session is still running in the worktree.** Its working directory disappears.
+
+Also:
+
+- The flag overrides the config: `--remove-worktrees=false` turns it off for one run.
+- Worktrees of branches that are only behind are never removed, and neither is the main worktree.
+- `--dry-run` prints `Would remove worktree <path>.` or the same warnings, from `git status` and the lock. It can't predict every refusal (submodules, for example).
+
 ## Options
 
 | Option | Description |
 | --- | --- |
 | `--verbose` | Print the git and `gh` commands that change or look something up to stderr, plus notes on skipped branches and the list of branches not updated because of another worktree |
-| `--dry-run` | Print `Would update branch ...` / `Would delete branch ...` without changing any branch. The fetch still runs |
+| `--dry-run` | Print `Would update branch ...` / `Would delete branch ...` / `Would remove worktree ...` without changing any branch or worktree. The fetch still runs |
+| `--remove-worktrees` | Remove the worktree of a branch to delete, unless git refuses, then delete the branch. Deletes ignored files. Also `gh-sync.removeWorktrees` in git config. See [Removing worktrees](#removing-worktrees) |
 | `--color=WHEN` | `auto` (default), `always` or `never` |
 | `--remote=NAME` | Use `NAME` as the main remote |
 | `--exclude=GLOB` | Leave branches matching `GLOB` alone. Repeatable. See [Excluding branches](#excluding-branches) |
@@ -118,7 +148,7 @@ Patterns are matched against the whole branch name with Go's [`path.Match`](http
 
 Updated branches are green, deleted ones red, warnings yellow and errors bold red. With `--color=auto`, stdout and stderr are each colorized only when they are a terminal, and a non-empty [`NO_COLOR`](https://no-color.org) disables color.
 
-Branch updates, deletions and switches go to stdout; warnings, hints, notes, errors, `--verbose` output, fetch progress and `Already up to date.` go to stderr, the last two only when it is a terminal. The exit status is `1` when gh-sync could not run or an update, deletion or fetch failed, and `0` otherwise, including when branches were skipped with a warning or a note.
+Branch updates, deletions and switches and worktree removals go to stdout; warnings, hints, notes, errors, `--verbose` output, fetch progress and `Already up to date.` go to stderr, the last two only when it is a terminal. The exit status is `1` when gh-sync could not run or an update, deletion or fetch failed, and `0` otherwise, including when branches were skipped with a warning or a note.
 
 ## Troubleshooting
 
