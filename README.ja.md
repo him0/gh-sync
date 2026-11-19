@@ -17,7 +17,7 @@ $ gh sync
 Updated branch main (was 3f2a1bc).
 Updated branch feature/login (was 9d04e7a).
 Deleted branch fix/typo (was c81b2d5).
-warning: 'wip/experiment' seems to contain unpushed commits
+warning: 'wip/experiment' has 2 commits not in 'origin/wip/experiment'; not updated
 ```
 
 ## インストール
@@ -53,14 +53,15 @@ gh sync
 | ローカルブランチ | 動作 |
 | --- | --- |
 | 遅れている | fast-forward する: `Updated branch <name> (was <sha>).` |
-| 先行または分岐している | 残す: `warning: '<name>' seems to contain unpushed commits` |
+| 先行している | 残す: `warning: '<name>' has 2 commits not in '<remote>/<branch>'; not updated` |
+| 分岐している | 残す: `warning: '<name>' has diverged from '<remote>/<branch>' (2 ahead, 1 behind); not updated` |
 | upstream が削除済みで、全コミットがデフォルトブランチに含まれる | 削除する: `Deleted branch <name> (was <sha>).` |
 | upstream が削除済みで、先頭がマージ済み pull request の head か、そのコミットのいずれかと一致する(squash や rebase でのマージ) | 削除する: `Deleted branch <name> (was <sha>, merged via #<number>).` |
 | upstream が削除済みで、マージ済み pull request の head の上にコミットを追加している | 残す: `warning: '<name>' was deleted on <remote>, but 2 commits were added after it was merged via #<number>; not deleted` |
 | upstream が削除済みで、それ以外 | 残す: `warning: '<name>' was deleted on <remote>, but 1 commit is not in '<default>' and no merged pull request matches it; not deleted` |
 | 最新、または remote に対応するブランチが無い | 何もしない |
 
-更新・削除したブランチが無く、警告も出なかった場合は、stderr が端末であれば `Already up to date.` と表示します。
+更新・削除したブランチが無く、警告も出ず、[別の worktree](#別の-worktree) が理由でスキップしたブランチも無い場合は、stderr が端末であれば `Already up to date.` と表示します。
 
 ### 安全性
 
@@ -69,15 +70,30 @@ gh sync
 - マージ済み pull request より遅れているブランチ(GitHub の「Update branch」や、ほかの場所からの push があった場合)も削除します。そのコミットはすべて pull request に含まれているためです。確認するのは pull request の最後の 100 コミットだけで、追加の fetch はしません。
 - マージ済み pull request は `gh api graphql` で 50 本ごとに 1 リクエストで確認します。確認できない場合(`gh` が未認証、GitHub 以外の remote、API エラー、30 秒のタイムアウト)は `... and pull requests couldn't be looked up; not deleted` と警告してブランチを残し、理由を `warning: couldn't look up merged pull requests: <reason>` として一度だけ表示します。`~/.ssh/config` のホストエイリアスや `ssh.github.com` は `ssh -G` で解決します。
 - 削除するブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替えます(`Switched to branch ...`)。ローカルに無ければ main remote から作成します。
-- 別の worktree でチェックアウトされているブランチは、警告を出してスキップします。
+- [別の worktree](#別の-worktree) でチェックアウトされているブランチは、更新も削除もしません。
 
 gh-sync が更新するのは**ローカル**のブランチだけです。fork を `upstream` と同期したあと、fork も更新するには push してください(例: `git push origin main`)。
+
+### 別の worktree
+
+別の worktree でチェックアウトされているブランチは、git が移動も削除も拒否します。gh-sync はそのブランチをスキップし、最後にまとめて報告します。
+
+```console
+warning: 2 merged branches are still checked out in other worktrees; not deleted:
+  feature/a      .claude/worktrees/eager-wiggling-moonbeam
+  feature/long   /home/me/elsewhere/wt
+hint: remove a worktree with `git worktree remove <path>`, then run gh sync again
+note: 3 branches checked out in other worktrees are behind their upstream; not updated
+```
+
+- warning には、削除するはずだったブランチが並びます。main worktree の中にある worktree は main worktree からの相対パスで、それ以外は絶対パスで表示します。
+- note は、fast-forward するはずだったブランチの数です。`--verbose` を付けると同じ形式の一覧も表示します。更新するには、その worktree で `git pull --ff-only` を実行してください。
 
 ## オプション
 
 | オプション | 説明 |
 | --- | --- |
-| `--verbose` | 変更や検索を行う git・`gh` コマンドと、スキップしたブランチの note を stderr に表示する |
+| `--verbose` | 変更や検索を行う git・`gh` コマンドと、スキップしたブランチの note、別の worktree が理由で更新しなかったブランチの一覧を stderr に表示する |
 | `--dry-run` | ブランチを変更せずに `Would update branch ...` / `Would delete branch ...` を表示する。fetch は実行する |
 | `--color=WHEN` | `auto`(デフォルト)、`always`、`never` |
 | `--remote=NAME` | `NAME` を main remote として使う |
@@ -102,7 +118,7 @@ gh sync --exclude='wip/*' --exclude=tmp
 
 更新したブランチは緑、削除したブランチは赤、警告は黄、エラーは太字の赤で表示します。`--color=auto` では stdout と stderr をそれぞれ端末のときだけ色付けし、空でない [`NO_COLOR`](https://no-color.org) があれば色を付けません。
 
-ブランチの更新・削除・切り替えは stdout に、警告、エラー、`--verbose` の出力、fetch の進捗、`Already up to date.` は stderr に出力します(最後の二つは端末のときだけ)。終了ステータスは、実行できなかったときや更新・削除・fetch に失敗したときは `1`、それ以外(警告を出してスキップした場合を含む)は `0` です。
+ブランチの更新・削除・切り替えは stdout に、警告、hint、note、エラー、`--verbose` の出力、fetch の進捗、`Already up to date.` は stderr に出力します(最後の二つは端末のときだけ)。終了ステータスは、実行できなかったときや更新・削除・fetch に失敗したときは `1`、それ以外(警告や note を出してスキップした場合を含む)は `0` です。
 
 ## トラブルシューティング
 

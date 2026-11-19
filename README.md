@@ -17,7 +17,7 @@ $ gh sync
 Updated branch main (was 3f2a1bc).
 Updated branch feature/login (was 9d04e7a).
 Deleted branch fix/typo (was c81b2d5).
-warning: 'wip/experiment' seems to contain unpushed commits
+warning: 'wip/experiment' has 2 commits not in 'origin/wip/experiment'; not updated
 ```
 
 ## Installation
@@ -53,14 +53,15 @@ gh sync
 | Local branch | Action |
 | --- | --- |
 | Behind | Fast-forwarded: `Updated branch <name> (was <sha>).` |
-| Ahead or diverged | Kept: `warning: '<name>' seems to contain unpushed commits` |
+| Ahead | Kept: `warning: '<name>' has 2 commits not in '<remote>/<branch>'; not updated` |
+| Diverged | Kept: `warning: '<name>' has diverged from '<remote>/<branch>' (2 ahead, 1 behind); not updated` |
 | Upstream deleted, all commits in the default branch | Deleted: `Deleted branch <name> (was <sha>).` |
 | Upstream deleted, tip is the head or one of the commits of a merged pull request (squash or rebase merge) | Deleted: `Deleted branch <name> (was <sha>, merged via #<number>).` |
 | Upstream deleted, commits added on top of a merged pull request's head | Kept: `warning: '<name>' was deleted on <remote>, but 2 commits were added after it was merged via #<number>; not deleted` |
 | Upstream deleted, otherwise | Kept: `warning: '<name>' was deleted on <remote>, but 1 commit is not in '<default>' and no merged pull request matches it; not deleted` |
 | Up to date, or no counterpart on the remote | Nothing |
 
-When no branch was updated or deleted and no warning was printed, gh-sync prints `Already up to date.` to stderr if it is a terminal.
+When no branch was updated or deleted, no warning was printed and no branch was skipped because of [another worktree](#other-worktrees), gh-sync prints `Already up to date.` to stderr if it is a terminal.
 
 ### Safety
 
@@ -69,15 +70,30 @@ When no branch was updated or deleted and no warning was printed, gh-sync prints
 - A branch that is behind its merged pull request (GitHub's "Update branch", a commit pushed from elsewhere) is deleted too: all its commits are in the pull request. Only the last 100 commits of a pull request are checked, and nothing extra is fetched.
 - Merged pull requests are looked up with `gh api graphql`, one request per 50 branches. When that fails (`gh` not authenticated, a remote not on GitHub, an API error, a 30-second timeout), the branch is kept with `... and pull requests couldn't be looked up; not deleted`, and the reason is printed once as `warning: couldn't look up merged pull requests: <reason>`. SSH host aliases from `~/.ssh/config` and `ssh.github.com` are resolved with `ssh -G`.
 - If the branch to delete is checked out, gh-sync first switches to the default branch (`Switched to branch ...`), creating it from the main remote if needed.
-- A branch checked out in another worktree is skipped with a warning.
+- A branch checked out in [another worktree](#other-worktrees) is never updated or deleted.
 
 gh-sync updates **local** branches only. After syncing a fork against `upstream`, push to update the fork too (e.g. `git push origin main`).
+
+### Other worktrees
+
+git refuses to move or delete a branch that is checked out in another worktree, so gh-sync skips it and reports the skipped branches together at the end:
+
+```console
+warning: 2 merged branches are still checked out in other worktrees; not deleted:
+  feature/a      .claude/worktrees/eager-wiggling-moonbeam
+  feature/long   /home/me/elsewhere/wt
+hint: remove a worktree with `git worktree remove <path>`, then run gh sync again
+note: 3 branches checked out in other worktrees are behind their upstream; not updated
+```
+
+- The warning lists the branches that would have been deleted. A worktree inside the main worktree is shown relative to it, any other with its absolute path.
+- The note counts the branches that would have been fast-forwarded; `--verbose` lists them the same way. Update one with `git pull --ff-only` in its worktree.
 
 ## Options
 
 | Option | Description |
 | --- | --- |
-| `--verbose` | Print the git and `gh` commands that change or look something up to stderr, plus notes on skipped branches |
+| `--verbose` | Print the git and `gh` commands that change or look something up to stderr, plus notes on skipped branches and the list of branches not updated because of another worktree |
 | `--dry-run` | Print `Would update branch ...` / `Would delete branch ...` without changing any branch. The fetch still runs |
 | `--color=WHEN` | `auto` (default), `always` or `never` |
 | `--remote=NAME` | Use `NAME` as the main remote |
@@ -102,7 +118,7 @@ Patterns are matched against the whole branch name with Go's [`path.Match`](http
 
 Updated branches are green, deleted ones red, warnings yellow and errors bold red. With `--color=auto`, stdout and stderr are each colorized only when they are a terminal, and a non-empty [`NO_COLOR`](https://no-color.org) disables color.
 
-Branch updates, deletions and switches go to stdout; warnings, errors, `--verbose` output, fetch progress and `Already up to date.` go to stderr, the last two only when it is a terminal. The exit status is `1` when gh-sync could not run or an update, deletion or fetch failed, and `0` otherwise, including when branches were skipped with a warning.
+Branch updates, deletions and switches go to stdout; warnings, hints, notes, errors, `--verbose` output, fetch progress and `Already up to date.` go to stderr, the last two only when it is a terminal. The exit status is `1` when gh-sync could not run or an update, deletion or fetch failed, and `0` otherwise, including when branches were skipped with a warning or a note.
 
 ## Troubleshooting
 
