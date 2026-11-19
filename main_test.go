@@ -1408,6 +1408,7 @@ func TestRunHelp(t *testing.T) {
 		t.Errorf("stdout does not start with the usage line:\n%s", res.stdout)
 	}
 	assertContains(t, "stdout", res.stdout, "--dry-run")
+	assertContains(t, "stdout", res.stdout, "--remove-worktrees")
 	if res.stderr != "" {
 		t.Errorf("stderr = %q, want empty", res.stderr)
 	}
@@ -1802,7 +1803,7 @@ func TestRunSkipsBranchesInOtherWorktree(t *testing.T) {
 	}
 }
 
-const worktreeHint = "hint: remove a worktree with `git worktree remove <path>`, then run gh sync again\n"
+const worktreeHint = "hint: remove a worktree with `git worktree remove <path>`, or run `gh sync --remove-worktrees` to remove the clean ones\n"
 
 // addWorktree checks branch out in a new worktree at path and returns the
 // path as git reports it (resolved, e.g. /private/var on macOS).
@@ -1894,6 +1895,295 @@ func TestRunWorktreeSummaryFromLinkedWorktree(t *testing.T) {
 	assertContains(t, "stderr", res.stderr, "note: 2 branches checked out in other worktrees are behind their upstream; not updated\n"+
 		"  behind   "+filepath.Join(".worktrees", "behind")+"\n"+
 		"  main     "+mainWorktree+"\n")
+}
+
+// TestRunRemoveWorktrees checks that --remove-worktrees removes the clean
+// worktrees of a merged branch and of a squash-merged branch and then deletes
+// the branches, printing each removal right before its deletion, with the
+// path relative to the main worktree when the worktree is inside it.
+func TestRunRemoveWorktrees(t *testing.T) {
+	f := newSyncFixture(t)
+	mainBefore := f.sha(f.local, "main")
+	f.pushMergedGoneBranch("merged")
+	f.pushUpstreamBranch("squashed", "squashed-1")
+	f.trackRemoteBranch("squashed")
+	squashedSHA := f.sha(f.local, "squashed")
+	f.squashMergeAndDelete("squashed")
+	var calls []prLookup
+	f.findMergedPRs = stubMergedPRs(map[string][]mergedPR{
+		"squashed": {{Number: 7, HeadRefOid: squashedSHA}},
+	}, &calls)
+	mergedSHA := f.sha(f.local, "merged")
+	inside := f.addWorktree(filepath.Join(f.local, ".worktrees", "merged"), "merged")
+	outside := f.addWorktree(filepath.Join(t.TempDir(), "squashed"), "squashed")
+
+	res := f.sync("--remove-worktrees")
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	want := fmt.Sprintf("Updated branch main (was %s).\n", mainBefore[:7]) +
+		"Removed worktree " + filepath.Join(".worktrees", "merged") + ".\n" +
+		fmt.Sprintf("Deleted branch merged (was %s).\n", mergedSHA[:7]) +
+		"Removed worktree " + outside + ".\n" +
+		fmt.Sprintf("Deleted branch squashed (was %s, merged via #7).\n", squashedSHA[:7])
+	if res.stdout != want {
+		t.Errorf("stdout = %q, want %q", res.stdout, want)
+	}
+	if res.stderr != "" {
+		t.Errorf("stderr = %q, want empty", res.stderr)
+	}
+	for _, branch := range []string{"merged", "squashed"} {
+		if f.localBranchExists(branch) {
+			t.Errorf("local branch %s still exists", branch)
+		}
+	}
+	for _, path := range []string{inside, outside} {
+		if dirExists(path) {
+			t.Errorf("worktree %s still exists", path)
+		}
+	}
+}
+
+// dirExists reports whether path exists.
+func dirExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// writeFile creates the file name in dir, containing the line "content".
+func writeFile(t *testing.T, dir, name string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunRemoveWorktreesByState checks what --remove-worktrees does with a
+// worktree in each state, and that --dry-run predicts the same outcome
+// without changing anything. A worktree git refuses to remove is kept with
+// its branch and one warning; that is a skip, so the exit status stays 0 and
+// the summary of branches not deleted is not printed as well.
+//
+// The "ignored file" case documents the risk of the option: git removes a
+// worktree whose only extra files are ignored ones, and they are lost.
+func TestRunRemoveWorktreesByState(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(f *syncFixture, path string)
+		// refusal is the reason in the warning, or "" when the worktree is
+		// removed.
+		refusal string
+	}{
+		{name: "clean", prepare: func(*syncFixture, string) {}},
+		{
+			name:    "untracked file",
+			prepare: func(f *syncFixture, path string) { writeFile(f.t, path, "notes.txt") },
+			refusal: "has modified or untracked files",
+		},
+		{
+			name: "staged file",
+			prepare: func(f *syncFixture, path string) {
+				writeFile(f.t, path, "notes.txt")
+				f.gitIn(path, "add", "notes.txt")
+			},
+			refusal: "has modified or untracked files",
+		},
+		{
+			name:    "locked",
+			prepare: func(f *syncFixture, path string) { f.localGit("worktree", "lock", "--reason", "in use", path) },
+			refusal: "is locked",
+		},
+		{
+			name: "ignored file",
+			prepare: func(f *syncFixture, path string) {
+				// The excludes file ignores a file named "content", which is
+				// what writeFile writes into every file.
+				f.localGit("config", "core.excludesFile", filepath.Join(f.local, ".git", "ignore"))
+				writeFile(f.t, filepath.Join(f.local, ".git"), "ignore")
+				writeFile(f.t, path, "content")
+			},
+		},
+	} {
+		for _, dryRun := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/dryRun=%v", tc.name, dryRun), func(t *testing.T) {
+				f := newSyncFixture(t)
+				f.pushMergedGoneBranch("merged")
+				// main is brought up to date first, so only the worktree and
+				// its branch are left to report.
+				f.localGit("pull", "--quiet", "--ff-only")
+				sha := f.sha(f.local, "merged")
+				path := f.addWorktree(filepath.Join(f.local, ".worktrees", "merged"), "merged")
+				shown := filepath.Join(".worktrees", "merged")
+				tc.prepare(f, path)
+
+				args := []string{"--remove-worktrees"}
+				if dryRun {
+					args = append(args, "--dry-run")
+				}
+				res := f.sync(args...)
+				if res.err != nil {
+					t.Fatalf("run() error: %v", res.err)
+				}
+
+				wantStdout, wantStderr := "", ""
+				switch {
+				case tc.refusal != "":
+					wantStderr = fmt.Sprintf("warning: 'merged' is checked out in %s, which %s; not deleted\n", shown, tc.refusal)
+				case dryRun:
+					wantStdout = fmt.Sprintf("Would remove worktree %s.\nWould delete branch merged (was %s).\n", shown, sha[:7])
+				default:
+					wantStdout = fmt.Sprintf("Removed worktree %s.\nDeleted branch merged (was %s).\n", shown, sha[:7])
+				}
+				if res.stdout != wantStdout {
+					t.Errorf("stdout = %q, want %q", res.stdout, wantStdout)
+				}
+				if res.stderr != wantStderr {
+					t.Errorf("stderr = %q, want %q", res.stderr, wantStderr)
+				}
+
+				removed := tc.refusal == "" && !dryRun
+				if dirExists(path) == removed {
+					t.Errorf("worktree exists = %v, want %v", !removed, removed)
+				}
+				if removed {
+					if f.localBranchExists("merged") {
+						t.Error("local branch merged still exists")
+					}
+				} else {
+					f.assertBranchAt("merged", sha)
+				}
+			})
+		}
+	}
+}
+
+// TestRemoveRefusal checks how git's refusals are worded in the warning: the
+// two expected ones in gh-sync's words, anything else as the first line of
+// git's message, and never with git's advice to use --force.
+func TestRemoveRefusal(t *testing.T) {
+	exit := errors.New("exit status 128")
+	for _, tc := range []struct {
+		name   string
+		stderr string
+		want   string
+	}{
+		{"dirty", "fatal: '/wt' contains modified or untracked files, use --force to delete it\n", "has modified or untracked files"},
+		{"locked", "fatal: cannot remove a locked working tree;\nuse 'remove -f -f' to override or unlock first\n", "is locked"},
+		{"locked with a reason", "fatal: cannot remove a locked working tree, lock reason: in use;\nuse 'remove -f -f' to override or unlock first\n", "is locked"},
+		{"submodules", "fatal: working trees containing submodules cannot be moved or removed\n", "couldn't be removed: working trees containing submodules cannot be moved or removed"},
+		{"other advice to force", "fatal: something is in the way, use --force to delete it\n", "couldn't be removed: something is in the way"},
+		{"no message", "", "couldn't be removed: exit status 128"},
+	} {
+		if got := removeRefusal(tc.stderr, exit); got != tc.want {
+			t.Errorf("%s: removeRefusal() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestRunRemoveWorktreesSetting checks where the setting comes from: the
+// gh-sync.removeWorktrees config, overridden in both directions by the flag
+// when it is given, and off by default.
+func TestRunRemoveWorktreesSetting(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config string
+		args   []string
+		remove bool
+	}{
+		{name: "default"},
+		{name: "config true", config: "true", remove: true},
+		{name: "config yes", config: "yes", remove: true},
+		{name: "config false", config: "false"},
+		{name: "flag", args: []string{"--remove-worktrees"}, remove: true},
+		{name: "flag false overrides config", config: "true", args: []string{"--remove-worktrees=false"}},
+		{name: "flag overrides config", config: "false", args: []string{"--remove-worktrees"}, remove: true},
+		{name: "flag overrides invalid config", config: "maybe", args: []string{"--remove-worktrees=false"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushMergedGoneBranch("merged")
+			sha := f.sha(f.local, "merged")
+			path := f.addWorktree(filepath.Join(f.local, ".worktrees", "merged"), "merged")
+			if tc.config != "" {
+				f.localGit("config", "gh-sync.removeWorktrees", tc.config)
+			}
+
+			res := f.sync(tc.args...)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			if tc.remove {
+				assertContains(t, "stdout", res.stdout, "Removed worktree "+filepath.Join(".worktrees", "merged")+".\n")
+				if dirExists(path) || f.localBranchExists("merged") {
+					t.Error("the worktree or its branch still exists")
+				}
+				return
+			}
+			want := "warning: 1 merged branch is still checked out in another worktree; not deleted:\n" +
+				"  merged   " + filepath.Join(".worktrees", "merged") + "\n" +
+				worktreeHint
+			if res.stderr != want {
+				t.Errorf("stderr = %q, want %q", res.stderr, want)
+			}
+			if !dirExists(path) {
+				t.Error("the worktree was removed")
+			}
+			f.assertBranchAt("merged", sha)
+		})
+	}
+}
+
+// TestRunRejectsInvalidRemoveWorktreesConfig checks that a
+// gh-sync.removeWorktrees value that is not a boolean stops gh-sync before
+// anything is synced.
+func TestRunRejectsInvalidRemoveWorktreesConfig(t *testing.T) {
+	f := newSyncFixture(t)
+	before := f.sha(f.local, "main")
+	f.advanceUpstream("main", "upstream-1")
+	f.localGit("config", "gh-sync.removeWorktrees", "maybe")
+
+	res := f.sync()
+	if res.err == nil {
+		t.Fatal("run() error = nil, want an error")
+	}
+	want := "fatal: couldn't read gh-sync.removeWorktrees: bad boolean config value 'maybe' for 'gh-sync.removeworktrees'\n"
+	if res.stderr != want {
+		t.Errorf("stderr = %q, want %q", res.stderr, want)
+	}
+	f.assertBranchAt("main", before)
+}
+
+// TestRunRemoveWorktreesKeepsMainWorktree checks that, run from a linked
+// worktree, --remove-worktrees does not try to remove the main worktree: a
+// merged branch checked out there is reported in the summary, with a hint
+// that fits.
+func TestRunRemoveWorktreesKeepsMainWorktree(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushMergedGoneBranch("merged")
+	sha := f.sha(f.local, "merged")
+	f.localGit("checkout", "--quiet", "merged")
+	linked := f.addWorktree(filepath.Join(t.TempDir(), "linked"), "main")
+	mainWorktree := f.localGit("rev-parse", "--show-toplevel")
+	t.Chdir(linked)
+
+	for _, dryRun := range []bool{false, true} {
+		args := []string{"--remove-worktrees"}
+		if dryRun {
+			args = append(args, "--dry-run")
+		}
+		res := f.sync(args...)
+		if res.err != nil {
+			t.Fatalf("run() error: %v", res.err)
+		}
+		want := "warning: 1 merged branch is still checked out in another worktree; not deleted:\n" +
+			"  merged   " + mainWorktree + "\n" +
+			"hint: the main worktree can't be removed; check out another branch in it, then run gh sync again\n"
+		if res.stderr != want {
+			t.Errorf("dryRun=%v: stderr = %q, want %q", dryRun, res.stderr, want)
+		}
+		assertNotContains(t, "stdout", res.stdout, "worktree")
+		f.assertBranchAt("merged", sha)
+	}
 }
 
 // TestRunColorsWorktreeSummaries checks that the whole warning block is

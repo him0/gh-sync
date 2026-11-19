@@ -81,17 +81,22 @@ func newColorConfig(enabled bool) colorConfig {
 // sshHosts caches the host names resolved with `ssh -G`, so ssh runs at most
 // once per host per sync.
 //
+// removeWorktrees makes deleteBranch remove the worktree of a branch it is
+// about to delete, when git agrees to without --force, instead of keeping the
+// branch. It is opt-in (--remove-worktrees or gh-sync.removeWorktrees).
+//
 // report records what was printed, so run() can tell whether the sync left
 // everything as it was, and collects the branches skipped because of another
 // worktree, which are reported together at the end.
 type runConfig struct {
-	stdoutColors  colorConfig
-	stderrColors  colorConfig
-	verbose       bool
-	dryRun        bool
-	findMergedPRs mergedPRFinder
-	sshHosts      map[string]string
-	report        *syncReport
+	stdoutColors    colorConfig
+	stderrColors    colorConfig
+	verbose         bool
+	dryRun          bool
+	removeWorktrees bool
+	findMergedPRs   mergedPRFinder
+	sshHosts        map[string]string
+	report          *syncReport
 }
 
 // syncReport is shared by every copy of a runConfig, so processBranch and
@@ -104,6 +109,28 @@ type syncReport struct {
 	// they were found. printWorktreeSkips reports them.
 	notDeleted []worktreeSkip
 	notUpdated []worktreeSkip
+	// worktrees is read by worktreeInfo on first use, so `git worktree list`
+	// runs at most once per sync, and only when a worktree is in the way.
+	worktrees *worktreeInfo
+}
+
+// worktreeInfo is what gh-sync needs to know about the repository's
+// worktrees: the path of the main one ("" when it can't be determined) and
+// which ones are locked, by path.
+type worktreeInfo struct {
+	main   string
+	locked map[string]bool
+}
+
+// worktreeInfo returns the repository's worktrees as they were when it was
+// first called. Removing a worktree later doesn't change what callers use it
+// for: the main worktree stays, and a removed one is not looked up again.
+func (r *syncReport) worktreeInfo() worktreeInfo {
+	if r.worktrees == nil {
+		info := readWorktreeInfo()
+		r.worktrees = &info
+	}
+	return *r.worktrees
 }
 
 // worktreeSkip is a branch left alone because it is checked out in another
@@ -155,6 +182,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 	var (
 		verbose     bool
 		dryRun      bool
+		removeFlag  bool
 		colorFlag   string
 		remoteFlag  string
 		excludeFlag stringList
@@ -162,6 +190,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 	)
 	fs.BoolVar(&verbose, "verbose", false, "verbose output")
 	fs.BoolVar(&dryRun, "dry-run", false, "show what would be updated or deleted without changing branches")
+	fs.BoolVar(&removeFlag, "remove-worktrees", false, "remove the clean worktree of a branch to delete, then delete the branch")
 	fs.StringVar(&colorFlag, "color", "auto", "colorize output (always, never, auto)")
 	fs.StringVar(&remoteFlag, "remote", "", "sync against this remote instead of the automatically chosen one")
 	fs.Var(&excludeFlag, "exclude", "skip local branches matching this glob (repeatable)")
@@ -218,6 +247,18 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 	}
 
 	excludes, err := getExcludePatterns(excludeFlag)
+	if err != nil {
+		printError(cfg.stderrColors, "fatal: %s", err.Error())
+		return err
+	}
+
+	removeGiven := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "remove-worktrees" {
+			removeGiven = true
+		}
+	})
+	cfg.removeWorktrees, err = getRemoveWorktrees(removeFlag, removeGiven)
 	if err != nil {
 		printError(cfg.stderrColors, "fatal: %s", err.Error())
 		return err
@@ -358,6 +399,8 @@ Options:
         verbose output
   --dry-run
         show what would be updated or deleted without changing branches
+  --remove-worktrees
+        remove the clean worktree of a branch to delete, then delete the branch
   --color string
         colorize output (always, never, auto) (default "auto")
   --remote name
@@ -410,6 +453,28 @@ func getExcludePatterns(flags []string) ([]string, error) {
 	return patterns, nil
 }
 
+// getRemoveWorktrees returns whether worktrees may be removed: the
+// --remove-worktrees flag when it was given, with either value, and otherwise
+// the gh-sync.removeWorktrees git config, which defaults to false. A config
+// value git can't read as a boolean is an error, so a typo doesn't silently
+// leave the option off.
+//
+// The config is not read when the flag was given, so the flag also works as a
+// way around a broken config value.
+func getRemoveWorktrees(flagValue, flagGiven bool) (bool, error) {
+	if flagGiven {
+		return flagValue, nil
+	}
+	stdout, stderr, err := gitOutputC("config", "--type=bool", "--get", "gh-sync.removeWorktrees")
+	if isExitCode(err, 1) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("couldn't read gh-sync.removeWorktrees: %s", gitReason(stderr, err))
+	}
+	return strings.TrimSpace(stdout) == "true", nil
+}
+
 // matchExclude returns the first pattern in patterns that matches branch.
 // Patterns use path.Match syntax, so "*" does not cross a "/": "wip/*"
 // matches "wip/foo" but not "wip/foo/bar".
@@ -454,6 +519,33 @@ func commandOutput(cmd *exec.Cmd) ([]byte, error) {
 		}
 	}
 	return out, err
+}
+
+// gitOutputC runs git in the C locale and returns its stdout and stderr
+// separately, for callers that read git's own message: to recognize it, or to
+// show it without the "exit status N" that gitOutput puts in front.
+func gitOutputC(args ...string) (stdout, stderr string, err error) {
+	cmd := exec.Command("git", args...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	out, err := cmd.Output()
+	return string(out), errBuf.String(), err
+}
+
+// gitReason returns the first line of git's error output without its
+// "fatal: " or "error: " prefix, to embed in a message of gh-sync's own. When
+// git printed nothing it falls back to err.
+func gitReason(stderr string, err error) string {
+	line, _, _ := strings.Cut(strings.TrimSpace(stderr), "\n")
+	line = strings.TrimSpace(line)
+	for _, prefix := range []string{"fatal: ", "error: "} {
+		line = strings.TrimPrefix(line, prefix)
+	}
+	if line == "" {
+		return err.Error()
+	}
+	return line
 }
 
 // isExitCode reports whether err is a command that exited with code.
@@ -872,13 +964,24 @@ func inOtherWorktree(branch, worktreePath, currentBranch string) bool {
 
 // deleteBranch deletes branch, checking out defaultBranch first when branch
 // is checked out. reason is appended to the "(was <sha>" part of the message.
-// A branch checked out in another worktree (worktreePath) is kept, since git
-// refuses to delete it, and recorded in the report for the warning that
-// printWorktreeSkips prints. With --dry-run it only reports what it would do.
+// With --dry-run it only reports what it would do.
+//
+// A branch checked out in another worktree (worktreePath) can't be deleted
+// while that worktree exists. By default it is kept and recorded in the
+// report for the warning that printWorktreeSkips prints. With
+// cfg.removeWorktrees the worktree is removed first; when it can't be, the
+// branch is kept with a warning of its own, which is a skip and not a
+// failure. The main worktree can't be removed at all (gh-sync may be running
+// in a linked one), so a branch checked out there is recorded as by default.
 func deleteBranch(cfg runConfig, branch, oldCommit, worktreePath, reason string, currentBranch *string, remoteName, defaultBranch string) error {
 	if inOtherWorktree(branch, worktreePath, *currentBranch) {
-		cfg.report.notDeleted = append(cfg.report.notDeleted, worktreeSkip{branch: branch, path: worktreePath})
-		return nil
+		if !cfg.removeWorktrees || worktreePath == cfg.report.worktreeInfo().main {
+			cfg.report.notDeleted = append(cfg.report.notDeleted, worktreeSkip{branch: branch, path: worktreePath})
+			return nil
+		}
+		if !removeWorktree(cfg, branch, worktreePath) {
+			return nil
+		}
 	}
 	if branch == *currentBranch {
 		if cfg.dryRun {
@@ -906,6 +1009,94 @@ func deleteBranch(cfg runConfig, branch, oldCommit, worktreePath, reason string,
 	return nil
 }
 
+// removeWorktree removes the worktree at path, in which branch is checked
+// out, and reports whether the branch can now be deleted. It prints the
+// removal, or a warning saying why the worktree, and so the branch, is kept.
+// With --dry-run it removes nothing and predicts the outcome.
+//
+// The removal is left to `git worktree remove` without --force, which
+// refuses a worktree with modified or untracked files and a locked one. It
+// does delete ignored files, and it can't know whether a shell or an agent is
+// still running in the worktree; that is why removing worktrees is opt-in.
+func removeWorktree(cfg runConfig, branch, path string) bool {
+	info := cfg.report.worktreeInfo()
+	// Worked out before the removal: symlinks can't be resolved afterwards.
+	shown := displayWorktreePath(path, info.main)
+	var refusal string
+	if cfg.dryRun {
+		refusal = predictRemoveRefusal(path, info.locked[path])
+	} else {
+		// path is absolute, but `--` makes sure it is never read as an option.
+		args := []string{"worktree", "remove", "--", path}
+		verboseLog(cfg, "git", args)
+		if _, stderr, err := gitOutputC(args...); err != nil {
+			refusal = removeRefusal(stderr, err)
+		}
+	}
+	if refusal != "" {
+		printWarning(cfg, "'%s' is checked out in %s, which %s; not deleted", branch, shown, refusal)
+		return false
+	}
+	if cfg.dryRun {
+		printChange(cfg, "Would remove worktree %s.\n", shown)
+	} else {
+		printChange(cfg, "Removed worktree %s.\n", shown)
+	}
+	return true
+}
+
+// The reasons a worktree is kept that gh-sync words itself. They complete
+// "'<branch>' is checked out in <path>, which ...".
+const (
+	refusalDirty  = "has modified or untracked files"
+	refusalLocked = "is locked"
+)
+
+// removeRefusal turns the error output of a failed `git worktree remove` (in
+// the C locale) into the reason for the warning. The two refusals gh-sync
+// expects get its own wording; anything else (submodules, a broken worktree)
+// is passed on as the first line of git's message. git's advice to use
+// --force is never repeated: the user should look at the worktree first.
+func removeRefusal(stderr string, err error) string {
+	switch {
+	case strings.Contains(stderr, "contains modified or untracked files"):
+		return refusalDirty
+	case strings.Contains(stderr, "cannot remove a locked working tree"):
+		return refusalLocked
+	}
+	reason := gitReason(stderr, err)
+	if i := strings.Index(reason, ", use --force"); i >= 0 {
+		reason = reason[:i]
+	}
+	return "couldn't be removed: " + reason
+}
+
+// predictRemoveRefusal returns, for --dry-run, the reason `git worktree
+// remove` would refuse the worktree at path, or "" when it is expected to
+// remove it. It checks what is cheap to check, in git's order: the lock, then
+// the same `git status` git runs.
+//
+// It can't see everything: git also refuses a worktree with initialized
+// submodules, or one whose administrative files are broken, and the worktree
+// can change before the real run.
+func predictRemoveRefusal(path string, locked bool) string {
+	if locked {
+		return refusalLocked
+	}
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		// git removes the record of a worktree whose directory is gone.
+		return ""
+	}
+	stdout, stderr, err := gitOutputC("-C", path, "status", "--porcelain", "--ignore-submodules=none")
+	if err != nil {
+		return "couldn't be checked: " + gitReason(stderr, err)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		return refusalDirty
+	}
+	return ""
+}
+
 // printWorktreeSkips reports the branches that were not deleted or not
 // updated because they are checked out in another worktree. One message per
 // kind, instead of one per branch, keeps the output short in a repository
@@ -915,17 +1106,24 @@ func deleteBranch(cfg runConfig, branch, oldCommit, worktreePath, reason string,
 // a warning with the branches and their worktrees, and a hint. A branch that
 // is merely behind needs no action (its worktree may be in use), so it is a
 // note with the count; the list is printed with --verbose.
+//
+// With cfg.removeWorktrees the only branches not deleted here are those
+// checked out in the main worktree, so the hint is about that instead.
 func printWorktreeSkips(cfg runConfig) {
 	r := cfg.report
 	if len(r.notDeleted) == 0 && len(r.notUpdated) == 0 {
 		return
 	}
-	mainWorktree := mainWorktreePath()
+	mainWorktree := r.worktreeInfo().main
 	if n := len(r.notDeleted); n > 0 {
 		printWarning(cfg, "%s; not deleted:\n%s",
 			pluralize(n, "merged branch is still checked out in another worktree", "merged branches are still checked out in other worktrees"),
 			strings.Join(worktreeSkipLines(r.notDeleted, mainWorktree), "\n"))
-		fmt.Fprintln(os.Stderr, "hint: remove a worktree with `git worktree remove <path>`, then run gh sync again")
+		if cfg.removeWorktrees {
+			fmt.Fprintln(os.Stderr, "hint: the main worktree can't be removed; check out another branch in it, then run gh sync again")
+		} else {
+			fmt.Fprintln(os.Stderr, "hint: remove a worktree with `git worktree remove <path>`, or run `gh sync --remove-worktrees` to remove the clean ones")
+		}
 	}
 	if n := len(r.notUpdated); n > 0 {
 		printNotice("%s; not updated",
@@ -952,19 +1150,29 @@ func worktreeSkipLines(skips []worktreeSkip, mainWorktree string) []string {
 	return lines
 }
 
-// mainWorktreePath returns the path of the main worktree, which
-// `git worktree list` prints first, or "" when it can't be determined.
-func mainWorktreePath() string {
+// readWorktreeInfo reads `git worktree list --porcelain`: one block of lines
+// per worktree, the main one first, each starting with "worktree <path>" and
+// containing "locked" or "locked <reason>" when it is locked. When the list
+// can't be read, nothing is known: no main worktree and no locks.
+func readWorktreeInfo() worktreeInfo {
+	info := worktreeInfo{locked: make(map[string]bool)}
 	output, err := gitOutput("worktree", "list", "--porcelain")
 	if err != nil {
-		return ""
+		return info
 	}
-	first, _, _ := strings.Cut(string(output), "\n")
-	path, ok := strings.CutPrefix(strings.TrimSuffix(first, "\r"), "worktree ")
-	if !ok {
-		return ""
+	current, first := "", true
+	for line := range strings.SplitSeq(string(output), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if path, ok := strings.CutPrefix(line, "worktree "); ok {
+			current = path
+			if first {
+				info.main, first = path, false
+			}
+		} else if line == "locked" || strings.HasPrefix(line, "locked ") {
+			info.locked[current] = true
+		}
 	}
-	return path
+	return info
 }
 
 // displayWorktreePath returns path relative to mainWorktree when it is inside
