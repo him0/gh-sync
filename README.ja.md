@@ -70,7 +70,7 @@ gh sync
 - マージ済み pull request より遅れているブランチ(GitHub の「Update branch」や、ほかの場所からの push があった場合)も削除します。そのコミットはすべて pull request に含まれているためです。確認するのは pull request の最後の 100 コミットだけで、追加の fetch はしません。
 - マージ済み pull request は `gh api graphql` で 50 本ごとに 1 リクエストで確認します。確認できない場合(`gh` が未認証、GitHub 以外の remote、API エラー、30 秒のタイムアウト)は `... and pull requests couldn't be looked up; not deleted` と警告してブランチを残し、理由を `warning: couldn't look up merged pull requests: <reason>` として一度だけ表示します。`~/.ssh/config` のホストエイリアスや `ssh.github.com` は `ssh -G` で解決します。
 - 削除するブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替えます(`Switched to branch ...`)。ローカルに無ければ main remote から作成します。
-- [別の worktree](#別の-worktree) でチェックアウトされているブランチは、更新も削除もしません。
+- [別の worktree](#別の-worktree) でチェックアウトされているブランチは更新しません。削除するのは `--remove-worktrees` を付けたときだけで、先にその worktree を削除します。このオプションが無ければ worktree は削除せず、`--force` を使うこともありません。
 
 gh-sync が更新するのは**ローカル**のブランチだけです。fork を `upstream` と同期したあと、fork も更新するには push してください(例: `git push origin main`)。
 
@@ -82,19 +82,49 @@ gh-sync が更新するのは**ローカル**のブランチだけです。fork 
 warning: 2 merged branches are still checked out in other worktrees; not deleted:
   feature/a      .claude/worktrees/eager-wiggling-moonbeam
   feature/long   /home/me/elsewhere/wt
-hint: remove a worktree with `git worktree remove <path>`, then run gh sync again
+hint: remove a worktree with `git worktree remove <path>`, or run `gh sync --remove-worktrees` to remove the clean ones
 note: 3 branches checked out in other worktrees are behind their upstream; not updated
 ```
 
 - warning には、削除するはずだったブランチが並びます。main worktree の中にある worktree は main worktree からの相対パスで、それ以外は絶対パスで表示します。
 - note は、fast-forward するはずだったブランチの数です。`--verbose` を付けると同じ形式の一覧も表示します。更新するには、その worktree で `git pull --ff-only` を実行してください。
 
+#### worktree の削除
+
+`--remove-worktrees` を付けるか、`git config gh-sync.removeWorktrees true` を設定すると、削除するブランチの worktree を `git worktree remove` で削除してから、ブランチを削除します。
+
+```console
+Removed worktree .claude/worktrees/eager-wiggling-moonbeam.
+Deleted branch feature/a (was 1a2b3c4, merged via #12).
+```
+
+git が削除を拒否した worktree は、ブランチとともに残します。終了ステータスは `0` のままです。
+
+```console
+warning: 'feature/b' is checked out in .claude/worktrees/calm-river, which has modified or untracked files; not deleted
+warning: 'feature/c' is checked out in /home/me/elsewhere/wt, which is locked; not deleted
+```
+
+それ以外の理由(submodule を含む worktree など)で拒否された場合は、`..., which couldn't be removed: <git のメッセージ>; not deleted` と表示します。
+
+デフォルトで無効なのは、次の二つを防げないためです。
+
+- **ignore されているファイルは確認なしに削除されます。** git が拒否するのは変更済みまたは未追跡のファイルがある場合だけなので、worktree にある ignore 対象の `.env` やビルド成果物は失われます。
+- **その worktree でシェルやエージェントのセッションが動いているかどうかは、gh-sync には分かりません。** 動いていれば、作業ディレクトリが無くなります。
+
+そのほか:
+
+- フラグは設定より優先します。`--remove-worktrees=false` で、その実行だけ無効にできます。
+- 遅れているだけのブランチの worktree と main worktree は削除しません。
+- `--dry-run` では、`git status` とロックの有無をもとに `Would remove worktree <path>.` または同じ警告を表示します。submodule など、予測できない拒否もあります。
+
 ## オプション
 
 | オプション | 説明 |
 | --- | --- |
 | `--verbose` | 変更や検索を行う git・`gh` コマンドと、スキップしたブランチの note、別の worktree が理由で更新しなかったブランチの一覧を stderr に表示する |
-| `--dry-run` | ブランチを変更せずに `Would update branch ...` / `Would delete branch ...` を表示する。fetch は実行する |
+| `--dry-run` | ブランチも worktree も変更せずに `Would update branch ...` / `Would delete branch ...` / `Would remove worktree ...` を表示する。fetch は実行する |
+| `--remove-worktrees` | 削除するブランチの worktree を、git が拒否しない限り削除してから、ブランチを削除する。ignore されているファイルも消える。git config の `gh-sync.removeWorktrees` でも有効にできる。[worktree の削除](#worktree-の削除)を参照 |
 | `--color=WHEN` | `auto`(デフォルト)、`always`、`never` |
 | `--remote=NAME` | `NAME` を main remote として使う |
 | `--exclude=GLOB` | `GLOB` に一致するブランチには触れない。複数回指定可。[ブランチの除外](#ブランチの除外)を参照 |
@@ -118,7 +148,7 @@ gh sync --exclude='wip/*' --exclude=tmp
 
 更新したブランチは緑、削除したブランチは赤、警告は黄、エラーは太字の赤で表示します。`--color=auto` では stdout と stderr をそれぞれ端末のときだけ色付けし、空でない [`NO_COLOR`](https://no-color.org) があれば色を付けません。
 
-ブランチの更新・削除・切り替えは stdout に、警告、hint、note、エラー、`--verbose` の出力、fetch の進捗、`Already up to date.` は stderr に出力します(最後の二つは端末のときだけ)。終了ステータスは、実行できなかったときや更新・削除・fetch に失敗したときは `1`、それ以外(警告や note を出してスキップした場合を含む)は `0` です。
+ブランチの更新・削除・切り替えと worktree の削除は stdout に、警告、hint、note、エラー、`--verbose` の出力、fetch の進捗、`Already up to date.` は stderr に出力します(最後の二つは端末のときだけ)。終了ステータスは、実行できなかったときや更新・削除・fetch に失敗したときは `1`、それ以外(警告や note を出してスキップした場合を含む)は `0` です。
 
 ## トラブルシューティング
 
