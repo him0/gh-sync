@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -81,7 +82,8 @@ func newColorConfig(enabled bool) colorConfig {
 // once per host per sync.
 //
 // report records what was printed, so run() can tell whether the sync left
-// everything as it was.
+// everything as it was, and collects the branches skipped because of another
+// worktree, which are reported together at the end.
 type runConfig struct {
 	stdoutColors  colorConfig
 	stderrColors  colorConfig
@@ -92,10 +94,30 @@ type runConfig struct {
 	report        *syncReport
 }
 
-// syncReport is shared by every copy of a runConfig.
+// syncReport is shared by every copy of a runConfig, so processBranch and
+// deleteBranch can add to it without another parameter.
 type syncReport struct {
 	changed bool // a branch update, deletion or switch was printed
 	warned  bool // a warning was printed
+	// notDeleted and notUpdated are the branches that would have been deleted
+	// or fast-forwarded but are checked out in another worktree, in the order
+	// they were found. printWorktreeSkips reports them.
+	notDeleted []worktreeSkip
+	notUpdated []worktreeSkip
+}
+
+// worktreeSkip is a branch left alone because it is checked out in another
+// worktree, at path.
+type worktreeSkip struct {
+	branch string
+	path   string
+}
+
+// upToDate reports whether the sync changed nothing and has nothing to
+// report. A branch that could not be fast-forwarded because of its worktree
+// is only a note, not a warning, but the repository is not up to date.
+func (r *syncReport) upToDate() bool {
+	return !r.changed && !r.warned && len(r.notDeleted) == 0 && len(r.notUpdated) == 0
 }
 
 // mergedPR is a merged pull request, the commit its head pointed to and its
@@ -286,12 +308,14 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		}
 	}
 
+	printWorktreeSkips(cfg)
+
 	if hadFailure {
 		return fmt.Errorf("one or more branches failed to sync")
 	}
 	// stdout lists only what changed, so scripts can test it for emptiness.
 	// The message is for someone at a terminal, like fetch progress.
-	if stderrIsTerminal && !cfg.report.changed && !cfg.report.warned {
+	if stderrIsTerminal && cfg.report.upToDate() {
 		fmt.Fprintln(os.Stderr, "Already up to date.")
 	}
 	return nil
@@ -789,8 +813,8 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 		case ahead == 0 && behind > 0:
 			oldCommit := b.tip
 			if inOtherWorktree(branch, b.worktreePath, *currentBranch) {
-				// git refuses to move it; say why instead of failing.
-				printWarning(cfg, "'%s' is checked out in another worktree (%s); not updated", branch, b.worktreePath)
+				// git refuses to move it; report it instead of failing.
+				cfg.report.notUpdated = append(cfg.report.notUpdated, worktreeSkip{branch: branch, path: b.worktreePath})
 				return nil
 			}
 			if cfg.dryRun {
@@ -812,7 +836,12 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 			}
 			printChange(cfg, "%sUpdated branch %s%s%s (was %s).\n", cfg.stdoutColors.green, cfg.stdoutColors.lightGreen, branch, cfg.stdoutColors.reset, shortSHA(oldCommit))
 		default:
-			printWarning(cfg, "'%s' seems to contain unpushed commits", branch)
+			against := strings.TrimPrefix(remoteBranch, "refs/remotes/")
+			if behind == 0 {
+				printWarning(cfg, "'%s' has %s not in '%s'; not updated", branch, pluralize(ahead, "commit", "commits"), against)
+			} else {
+				printWarning(cfg, "'%s' has diverged from '%s' (%d ahead, %d behind); not updated", branch, against, ahead, behind)
+			}
 		}
 		return nil
 	}
@@ -843,12 +872,12 @@ func inOtherWorktree(branch, worktreePath, currentBranch string) bool {
 
 // deleteBranch deletes branch, checking out defaultBranch first when branch
 // is checked out. reason is appended to the "(was <sha>" part of the message.
-// A branch checked out in another worktree (worktreePath) is kept with a
-// warning, since git refuses to delete it. With --dry-run it only reports
-// what it would do.
+// A branch checked out in another worktree (worktreePath) is kept, since git
+// refuses to delete it, and recorded in the report for the warning that
+// printWorktreeSkips prints. With --dry-run it only reports what it would do.
 func deleteBranch(cfg runConfig, branch, oldCommit, worktreePath, reason string, currentBranch *string, remoteName, defaultBranch string) error {
 	if inOtherWorktree(branch, worktreePath, *currentBranch) {
-		printWarning(cfg, "'%s' is checked out in another worktree (%s); not deleted", branch, worktreePath)
+		cfg.report.notDeleted = append(cfg.report.notDeleted, worktreeSkip{branch: branch, path: worktreePath})
 		return nil
 	}
 	if branch == *currentBranch {
@@ -875,6 +904,94 @@ func deleteBranch(cfg runConfig, branch, oldCommit, worktreePath, reason string,
 	}
 	printChange(cfg, "%sDeleted branch %s%s%s (was %s%s).\n", cfg.stdoutColors.red, cfg.stdoutColors.lightRed, branch, cfg.stdoutColors.reset, shortSHA(oldCommit), reason)
 	return nil
+}
+
+// printWorktreeSkips reports the branches that were not deleted or not
+// updated because they are checked out in another worktree. One message per
+// kind, instead of one per branch, keeps the output short in a repository
+// with many worktrees.
+//
+// A merged branch that is still checked out is leftover to clean up, so it is
+// a warning with the branches and their worktrees, and a hint. A branch that
+// is merely behind needs no action (its worktree may be in use), so it is a
+// note with the count; the list is printed with --verbose.
+func printWorktreeSkips(cfg runConfig) {
+	r := cfg.report
+	if len(r.notDeleted) == 0 && len(r.notUpdated) == 0 {
+		return
+	}
+	mainWorktree := mainWorktreePath()
+	if n := len(r.notDeleted); n > 0 {
+		printWarning(cfg, "%s; not deleted:\n%s",
+			pluralize(n, "merged branch is still checked out in another worktree", "merged branches are still checked out in other worktrees"),
+			strings.Join(worktreeSkipLines(r.notDeleted, mainWorktree), "\n"))
+		fmt.Fprintln(os.Stderr, "hint: remove a worktree with `git worktree remove <path>`, then run gh sync again")
+	}
+	if n := len(r.notUpdated); n > 0 {
+		printNotice("%s; not updated",
+			pluralize(n, "branch checked out in another worktree is behind its upstream", "branches checked out in other worktrees are behind their upstream"))
+		if cfg.verbose {
+			for _, line := range worktreeSkipLines(r.notUpdated, mainWorktree) {
+				fmt.Fprintln(os.Stderr, line)
+			}
+		}
+	}
+}
+
+// worktreeSkipLines formats skips as indented lines of branch and worktree
+// path, with the branch names padded so the paths line up.
+func worktreeSkipLines(skips []worktreeSkip, mainWorktree string) []string {
+	width := 0
+	for _, s := range skips {
+		width = max(width, len([]rune(s.branch)))
+	}
+	lines := make([]string, 0, len(skips))
+	for _, s := range skips {
+		lines = append(lines, fmt.Sprintf("  %-*s   %s", width, s.branch, displayWorktreePath(s.path, mainWorktree)))
+	}
+	return lines
+}
+
+// mainWorktreePath returns the path of the main worktree, which
+// `git worktree list` prints first, or "" when it can't be determined.
+func mainWorktreePath() string {
+	output, err := gitOutput("worktree", "list", "--porcelain")
+	if err != nil {
+		return ""
+	}
+	first, _, _ := strings.Cut(string(output), "\n")
+	path, ok := strings.CutPrefix(strings.TrimSuffix(first, "\r"), "worktree ")
+	if !ok {
+		return ""
+	}
+	return path
+}
+
+// displayWorktreePath returns path relative to mainWorktree when it is inside
+// it (such as .claude/worktrees/<name>), which is shorter. Any other path,
+// and every path when mainWorktree is "", is returned as it is.
+//
+// Symlinks are resolved before comparing, so /tmp and /private/tmp on macOS
+// count as the same directory.
+func displayWorktreePath(path, mainWorktree string) string {
+	if mainWorktree == "" {
+		return path
+	}
+	rel, err := filepath.Rel(resolveSymlinks(mainWorktree), resolveSymlinks(path))
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return path
+	}
+	return rel
+}
+
+// resolveSymlinks returns path with its symlinks resolved, or path itself
+// when that fails (for example when it no longer exists).
+func resolveSymlinks(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return resolved
 }
 
 // checkoutDefaultBranchArgs returns the git arguments that switch to
@@ -1423,7 +1540,15 @@ func printChange(cfg runConfig, format string, args ...any) {
 	fmt.Printf(format, args...)
 }
 
-// printNote prints "note: <message>" to stderr with --verbose only.
+// printNotice prints "note: <message>" to stderr, with or without --verbose.
+// It is for something the user should know about but need not act on, so
+// unlike a warning it is not colored.
+func printNotice(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "note: %s\n", fmt.Sprintf(format, args...))
+}
+
+// printNote prints "note: <message>" to stderr with --verbose only: details
+// about a single branch that was skipped.
 func printNote(cfg runConfig, format string, args ...any) {
 	if cfg.verbose {
 		fmt.Fprintf(os.Stderr, "note: %s\n", fmt.Sprintf(format, args...))

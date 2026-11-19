@@ -1097,20 +1097,28 @@ func TestRunDryRun(t *testing.T) {
 	}
 }
 
+// TestRunWarnsOnUnpushedCommits checks that a branch with commits its
+// upstream doesn't have is kept, with a warning that names the upstream and
+// tells ahead from diverged.
 func TestRunWarnsOnUnpushedCommits(t *testing.T) {
 	tests := []struct {
-		name            string
-		upstreamAdvance bool // true: diverged (ahead and behind); false: ahead only
+		name     string
+		local    []string // commits added locally
+		upstream []string // commits added on the remote
+		want     string
 	}{
-		{"ahead", false},
-		{"diverged", true},
+		{"ahead by one", []string{"local-1"}, nil, "warning: 'main' has 1 commit not in 'origin/main'; not updated\n"},
+		{"ahead by two", []string{"local-1", "local-2"}, nil, "warning: 'main' has 2 commits not in 'origin/main'; not updated\n"},
+		{"diverged", []string{"local-1", "local-2"}, []string{"upstream-1"}, "warning: 'main' has diverged from 'origin/main' (2 ahead, 1 behind); not updated\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newSyncFixture(t)
-			f.commit(f.local, "local-only")
-			if tt.upstreamAdvance {
-				f.advanceUpstream("main", "upstream-1")
+			for _, msg := range tt.local {
+				f.commit(f.local, msg)
+			}
+			if len(tt.upstream) > 0 {
+				f.advanceUpstream("main", tt.upstream...)
 			}
 			before := f.sha(f.local, "main")
 
@@ -1118,13 +1126,39 @@ func TestRunWarnsOnUnpushedCommits(t *testing.T) {
 			if res.err != nil {
 				t.Fatalf("run() error: %v", res.err)
 			}
-			assertContains(t, "stderr", res.stderr, "warning: 'main' seems to contain unpushed commits")
+			if res.stderr != tt.want {
+				t.Errorf("stderr = %q, want %q", res.stderr, tt.want)
+			}
 			assertNotContains(t, "stdout", res.stdout, "Updated branch main")
 			if got := f.sha(f.local, "main"); got != before {
 				t.Errorf("local main = %s, want unchanged %s", got, before)
 			}
 		})
 	}
+}
+
+// TestRunWarnsOnUnpushedCommitsMatchedByName checks that for a branch without
+// upstream config the warning names the same-named branch on the main remote,
+// which is what it was compared against.
+func TestRunWarnsOnUnpushedCommitsMatchedByName(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushUpstreamBranch("feature", "feature-1")
+	f.localGit("fetch", "--quiet", "origin")
+	f.localGit("checkout", "--quiet", "--no-track", "-b", "feature", "origin/feature")
+	f.commit(f.local, "local-1")
+	f.localGit("checkout", "--quiet", "main")
+	f.advanceUpstream("feature", "feature-2", "feature-3")
+	before := f.sha(f.local, "feature")
+
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	want := "warning: 'feature' has diverged from 'origin/feature' (1 ahead, 2 behind); not updated\n"
+	if res.stderr != want {
+		t.Errorf("stderr = %q, want %q", res.stderr, want)
+	}
+	f.assertBranchAt("feature", before)
 }
 
 // TestRunColorsWarnings checks that warnings are yellow when stderr is
@@ -1134,8 +1168,8 @@ func TestRunColorsWarnings(t *testing.T) {
 		color string
 		want  string
 	}{
-		{"always", "\033[33mwarning: 'main' seems to contain unpushed commits\033[0m\n"},
-		{"never", "warning: 'main' seems to contain unpushed commits\n"},
+		{"always", "\033[33mwarning: 'main' has 1 commit not in 'origin/main'; not updated\033[0m\n"},
+		{"never", "warning: 'main' has 1 commit not in 'origin/main'; not updated\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.color, func(t *testing.T) {
@@ -1707,8 +1741,10 @@ func TestRunKeepsBranchWhenCheckoutFails(t *testing.T) {
 
 // TestRunSkipsBranchesInOtherWorktree checks that a behind branch, a merged
 // gone branch and a squash-merged gone branch, each checked out in another
-// worktree, are kept with a warning naming the worktree, are not counted as
-// failures, and get the same warnings with --dry-run.
+// worktree, are kept, are not counted as failures, and are reported the same
+// way with --dry-run: one warning listing the branches that were not deleted
+// with their worktrees, and one note counting those that were not updated.
+// The worktrees are outside the main worktree, so their paths are absolute.
 func TestRunSkipsBranchesInOtherWorktree(t *testing.T) {
 	for _, dryRun := range []bool{false, true} {
 		t.Run(fmt.Sprintf("dryRun=%v", dryRun), func(t *testing.T) {
@@ -1750,13 +1786,202 @@ func TestRunSkipsBranchesInOtherWorktree(t *testing.T) {
 			if res.err != nil {
 				t.Fatalf("run() error: %v", res.err)
 			}
-			assertContains(t, "stderr", res.stderr, fmt.Sprintf("warning: 'behind' is checked out in another worktree (%s); not updated", paths["behind"]))
-			assertContains(t, "stderr", res.stderr, fmt.Sprintf("warning: 'merged' is checked out in another worktree (%s); not deleted", paths["merged"]))
-			assertContains(t, "stderr", res.stderr, fmt.Sprintf("warning: 'squashed' is checked out in another worktree (%s); not deleted", paths["squashed"]))
-			assertNotContains(t, "stderr", res.stderr, "couldn't")
+			want := "warning: 2 merged branches are still checked out in other worktrees; not deleted:\n" +
+				"  merged     " + paths["merged"] + "\n" +
+				"  squashed   " + paths["squashed"] + "\n" +
+				worktreeHint +
+				"note: 1 branch checked out in another worktree is behind its upstream; not updated\n"
+			if res.stderr != want {
+				t.Errorf("stderr = %q, want %q", res.stderr, want)
+			}
 			for branch, sha := range before {
 				assertNotContains(t, "stdout", res.stdout, "branch "+branch)
 				f.assertBranchAt(branch, sha)
+			}
+		})
+	}
+}
+
+const worktreeHint = "hint: remove a worktree with `git worktree remove <path>`, then run gh sync again\n"
+
+// addWorktree checks branch out in a new worktree at path and returns the
+// path as git reports it (resolved, e.g. /private/var on macOS).
+func (f *syncFixture) addWorktree(path, branch string) string {
+	f.t.Helper()
+	f.localGit("worktree", "add", "--quiet", path, branch)
+	return f.gitIn(path, "rev-parse", "--show-toplevel")
+}
+
+// pushMergedGoneBranch makes branch a local branch that was merged into main
+// and deleted on the remote.
+func (f *syncFixture) pushMergedGoneBranch(branch string) {
+	f.t.Helper()
+	f.pushUpstreamBranch(branch, branch+"-1")
+	f.trackRemoteBranch(branch)
+	f.mergeIntoUpstreamMain(branch)
+	f.deleteRemoteBranch(branch)
+}
+
+// pushBehindBranch makes branch a local branch that is one commit behind its
+// upstream.
+func (f *syncFixture) pushBehindBranch(branch string) {
+	f.t.Helper()
+	f.pushUpstreamBranch(branch, branch+"-1")
+	f.trackRemoteBranch(branch)
+	f.advanceUpstream(branch, branch+"-2")
+}
+
+// TestRunWorktreeSummaryWording checks the other grammatical number of both
+// worktree summaries (one branch not deleted, several not updated), that a
+// worktree inside the main worktree is shown relative to it while one outside
+// keeps its absolute path, and that the branches behind are only listed with
+// --verbose.
+func TestRunWorktreeSummaryWording(t *testing.T) {
+	for _, verbose := range []bool{false, true} {
+		t.Run(fmt.Sprintf("verbose=%v", verbose), func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushMergedGoneBranch("merged")
+			f.pushBehindBranch("behind")
+			f.pushBehindBranch("behind-longer")
+			f.addWorktree(filepath.Join(f.local, ".worktrees", "merged"), "merged")
+			f.addWorktree(filepath.Join(f.local, ".worktrees", "behind"), "behind")
+			outside := f.addWorktree(filepath.Join(t.TempDir(), "outside"), "behind-longer")
+
+			var args []string
+			if verbose {
+				args = append(args, "--verbose")
+			}
+			res := f.sync(args...)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			warning := "warning: 1 merged branch is still checked out in another worktree; not deleted:\n" +
+				"  merged   " + filepath.Join(".worktrees", "merged") + "\n" +
+				worktreeHint
+			note := "note: 2 branches checked out in other worktrees are behind their upstream; not updated\n"
+			list := "  behind          " + filepath.Join(".worktrees", "behind") + "\n" +
+				"  behind-longer   " + outside + "\n"
+			if verbose {
+				assertContains(t, "stderr", res.stderr, warning+note+list)
+			} else if res.stderr != warning+note {
+				t.Errorf("stderr = %q, want %q", res.stderr, warning+note)
+			}
+			// Only main, which received the merge, is updated.
+			for _, branch := range []string{"merged", "behind", "behind-longer"} {
+				assertNotContains(t, "stdout", res.stdout, "branch "+branch)
+			}
+		})
+	}
+}
+
+// TestRunWorktreeSummaryFromLinkedWorktree checks that paths are relative to
+// the main worktree, not to the worktree gh-sync runs in, and that a branch
+// checked out in the main worktree itself is shown with its absolute path.
+func TestRunWorktreeSummaryFromLinkedWorktree(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushBehindBranch("behind")
+	f.advanceUpstream("main", "main-2")
+	f.addWorktree(filepath.Join(f.local, ".worktrees", "behind"), "behind")
+	f.localGit("branch", "--quiet", "other", "main")
+	linked := f.addWorktree(filepath.Join(t.TempDir(), "linked"), "other")
+	mainWorktree := f.localGit("rev-parse", "--show-toplevel")
+	t.Chdir(linked)
+
+	res := f.sync("--verbose")
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	assertContains(t, "stderr", res.stderr, "note: 2 branches checked out in other worktrees are behind their upstream; not updated\n"+
+		"  behind   "+filepath.Join(".worktrees", "behind")+"\n"+
+		"  main     "+mainWorktree+"\n")
+}
+
+// TestRunColorsWorktreeSummaries checks that the whole warning block is
+// yellow, while the hint and the note are not colored.
+func TestRunColorsWorktreeSummaries(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushMergedGoneBranch("merged")
+	f.pushBehindBranch("behind")
+	f.addWorktree(filepath.Join(f.local, ".worktrees", "merged"), "merged")
+	f.addWorktree(filepath.Join(f.local, ".worktrees", "behind"), "behind")
+
+	res := f.sync("--color=always")
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+	want := "\033[33mwarning: 1 merged branch is still checked out in another worktree; not deleted:\n" +
+		"  merged   " + filepath.Join(".worktrees", "merged") + "\033[0m\n" +
+		worktreeHint +
+		"note: 1 branch checked out in another worktree is behind its upstream; not updated\n"
+	if res.stderr != want {
+		t.Errorf("stderr = %q, want %q", res.stderr, want)
+	}
+}
+
+func TestDisplayWorktreePath(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(base, "repo")
+	inside := filepath.Join(repo, ".claude", "worktrees", "foo")
+	sibling := filepath.Join(base, "repo-wt")
+	for _, dir := range []string{inside, sibling} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// link is another name for repo, as /tmp is for /private/tmp on macOS.
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(repo, link); err != nil {
+		t.Skipf("symlinks are not available: %v", err)
+	}
+	missing := filepath.Join(repo, "missing")
+
+	tests := []struct {
+		name         string
+		path         string
+		mainWorktree string
+		want         string
+	}{
+		{"inside", inside, repo, filepath.Join(".claude", "worktrees", "foo")},
+		{"inside, main worktree given through a symlink", inside, link, filepath.Join(".claude", "worktrees", "foo")},
+		{"inside, path given through a symlink", filepath.Join(link, ".claude", "worktrees", "foo"), repo, filepath.Join(".claude", "worktrees", "foo")},
+		{"inside but missing, so not resolvable", missing, repo, "missing"},
+		{"outside, sharing a name prefix", sibling, repo, sibling},
+		{"the main worktree itself", repo, repo, repo},
+		{"main worktree unknown", inside, "", inside},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := displayWorktreePath(tt.path, tt.mainWorktree); got != tt.want {
+				t.Errorf("displayWorktreePath(%q, %q) = %q, want %q", tt.path, tt.mainWorktree, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSyncReportUpToDate checks what suppresses "Already up to date.". run()
+// only prints it when stderr is a terminal, which the tests can't simulate,
+// so the condition is tested here: in particular a branch that was not
+// updated because of its worktree, which prints a note and no warning.
+func TestSyncReportUpToDate(t *testing.T) {
+	skip := []worktreeSkip{{branch: "feature", path: "/somewhere"}}
+	tests := []struct {
+		name   string
+		report syncReport
+		want   bool
+	}{
+		{"nothing happened", syncReport{}, true},
+		{"changed", syncReport{changed: true}, false},
+		{"warned", syncReport{warned: true}, false},
+		{"not deleted in a worktree", syncReport{notDeleted: skip}, false},
+		{"not updated in a worktree", syncReport{notUpdated: skip}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.report.upToDate(); got != tt.want {
+				t.Errorf("upToDate() = %v, want %v", got, tt.want)
 			}
 		})
 	}
