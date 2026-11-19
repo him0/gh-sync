@@ -671,7 +671,7 @@ func TestRunDeletesSquashMergedBranch(t *testing.T) {
 			default:
 				assertContains(t, "stdout", res.stdout, deleted)
 			}
-			assertNotContains(t, "stderr", res.stderr, "appears not merged")
+			assertNotContains(t, "stderr", res.stderr, "was deleted on origin")
 
 			if tt.dryRun {
 				f.assertBranchAt(tt.local, tip)
@@ -725,61 +725,191 @@ func TestRunLooksUpSquashMergedBranchesTogether(t *testing.T) {
 	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch copy-of-a (was %s, merged via #1).", tipA[:7]))
 	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature-a (was %s, merged via #1).", tipA[:7]))
 	assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature-b (was %s, merged via #2).", tipB[:7]))
-	assertContains(t, "stderr", res.stderr, "warning: 'feature-c' was deleted on origin, but appears not merged into 'main'")
+	assertContains(t, "stderr", res.stderr, "warning: 'feature-c' was deleted on origin, but 1 commit is not in 'main' and no merged pull request matches it; not deleted")
 	// feature-c has no merged pull request and must be kept.
 	f.assertBranchAt("feature-c", f.sha(f.upstream, "feature-c"))
 }
 
-// TestRunKeepsSquashMergedBranchWithoutPR checks the fallback: when no merged
-// pull request matches the tip, or the lookup fails, the branch is kept with
-// the usual warning. The failure reason is shown only with --verbose.
-func TestRunKeepsSquashMergedBranchWithoutPR(t *testing.T) {
-	lookupErr := errors.New("gh: not logged in")
+// TestRunDeletesBranchBehindMergedPR checks that a branch whose tip is one of
+// a merged pull request's commits, but not its head, is deleted: commits were
+// pushed to the pull request from elsewhere before it was merged, and the
+// local branch never fetched them.
+func TestRunDeletesBranchBehindMergedPR(t *testing.T) {
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dryRun=%v", dryRun), func(t *testing.T) {
+			f := newSyncFixture(t)
+			base := f.sha(f.upstream, "main")
+			f.pushUpstreamBranch("feature", "feature-1")
+			f.trackRemoteBranch("feature")
+			tip := f.sha(f.local, "feature")
+			f.advanceUpstream("feature", "feature-2")
+			head := f.sha(f.upstream, "feature")
+			f.squashMergeAndDelete("feature")
+
+			var calls []prLookup
+			// The head of #4 is an ancestor of the tip, which alone would
+			// mean "commits added after the merge"; #5 containing the tip
+			// takes precedence.
+			f.findMergedPRs = stubMergedPRs(map[string][]mergedPR{
+				"feature": {
+					{Number: 4, HeadRefOid: base, Commits: []string{base}},
+					{Number: 5, HeadRefOid: head, Commits: []string{tip, head}},
+				},
+			}, &calls)
+			var args []string
+			if dryRun {
+				args = append(args, "--dry-run")
+			}
+			res := f.sync(args...)
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+
+			assertNotContains(t, "stderr", res.stderr, "warning:")
+			if dryRun {
+				assertContains(t, "stdout", res.stdout, fmt.Sprintf("Would delete branch feature (was %s, merged via #5).", tip[:7]))
+				f.assertBranchAt("feature", tip)
+				return
+			}
+			assertContains(t, "stdout", res.stdout, fmt.Sprintf("Deleted branch feature (was %s, merged via #5).", tip[:7]))
+			if f.localBranchExists("feature") {
+				t.Error("local branch feature still exists")
+			}
+		})
+	}
+}
+
+// TestRunKeepsBranchWithCommitsAddedAfterMerge checks that a branch with
+// commits on top of a merged pull request's head is kept, and that the
+// warning names the pull request and counts the added commits.
+func TestRunKeepsBranchWithCommitsAddedAfterMerge(t *testing.T) {
 	tests := []struct {
-		name     string
-		prs      []mergedPR // merged pull requests for "feature"
-		err      error
-		verbose  bool
-		wantNote bool
+		name  string
+		added []string // commits made locally after the merge
+		want  string
 	}{
-		{"no merged pull request", nil, nil, false, false},
-		// Commits were added after the pull request was merged.
-		{"head differs from tip", []mergedPR{{Number: 7, HeadRefOid: strings.Repeat("0", 40)}}, nil, false, false},
-		{"lookup failed", nil, lookupErr, false, false},
-		{"lookup failed, verbose", nil, lookupErr, true, true},
+		{"one commit", []string{"local-1"}, "1 commit was added after it was merged via #7"},
+		{"two commits", []string{"local-1", "local-2"}, "2 commits were added after it was merged via #7"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newSyncFixture(t)
 			f.pushUpstreamBranch("feature", "feature-1")
 			f.trackRemoteBranch("feature")
-			tip := f.sha(f.local, "feature")
+			head := f.sha(f.local, "feature")
 			f.squashMergeAndDelete("feature")
-			f.findMergedPRs = func(runConfig, Remote, string, []string) (map[string][]mergedPR, error) {
-				if tt.err != nil {
-					return nil, tt.err
-				}
-				return map[string][]mergedPR{"feature": tt.prs}, nil
+			f.localGit("checkout", "--quiet", "feature")
+			for _, msg := range tt.added {
+				f.commit(f.local, msg)
 			}
-			var args []string
-			if tt.verbose {
-				args = append(args, "--verbose")
-			}
+			tip := f.sha(f.local, "feature")
 
-			res := f.sync(args...)
+			var calls []prLookup
+			f.findMergedPRs = stubMergedPRs(map[string][]mergedPR{
+				"feature": {{Number: 7, HeadRefOid: head, Commits: []string{head}}},
+			}, &calls)
+			res := f.sync()
 			if res.err != nil {
 				t.Fatalf("run() error: %v", res.err)
 			}
-			assertContains(t, "stderr", res.stderr, "warning: 'feature' was deleted on origin, but appears not merged into 'main'")
-			assertNotContains(t, "stdout", res.stdout, "Deleted branch feature")
-			if tt.wantNote {
-				assertContains(t, "stderr", res.stderr, "note: couldn't look up merged pull requests: gh: not logged in")
-			} else {
-				assertNotContains(t, "stderr", res.stderr, "note: couldn't look up")
+
+			assertContains(t, "stderr", res.stderr, "warning: 'feature' was deleted on origin, but "+tt.want+"; not deleted\n")
+			assertNotContains(t, "stdout", res.stdout, "branch feature")
+			f.assertBranchAt("feature", tip)
+			if f.currentBranch() != "feature" {
+				t.Errorf("current branch = %q, want feature", f.currentBranch())
 			}
+		})
+	}
+}
+
+// TestRunKeepsBranchWithoutMatchingPR checks that a branch is kept when no
+// merged pull request contains its tip or has a head it descends from, and
+// that the warning counts the commits missing from the default branch.
+func TestRunKeepsBranchWithoutMatchingPR(t *testing.T) {
+	// A commit that does not exist locally, so it can't be an ancestor.
+	unknown := strings.Repeat("0", 40)
+	tests := []struct {
+		name    string
+		commits []string   // commits on "feature"
+		prs     []mergedPR // merged pull requests for "feature"
+		want    string
+	}{
+		{"no merged pull request", []string{"feature-1"}, nil, "1 commit is not in 'main'"},
+		{"several commits", []string{"feature-1", "feature-2", "feature-3"}, nil, "3 commits are not in 'main'"},
+		{"unrelated pull request", []string{"feature-1"}, []mergedPR{{Number: 7, HeadRefOid: unknown, Commits: []string{unknown}}}, "1 commit is not in 'main'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			f.pushUpstreamBranch("feature", tt.commits...)
+			f.trackRemoteBranch("feature")
+			tip := f.sha(f.local, "feature")
+			f.squashMergeAndDelete("feature")
+			var calls []prLookup
+			f.findMergedPRs = stubMergedPRs(map[string][]mergedPR{"feature": tt.prs}, &calls)
+
+			res := f.sync()
+			if res.err != nil {
+				t.Fatalf("run() error: %v", res.err)
+			}
+			assertContains(t, "stderr", res.stderr, "warning: 'feature' was deleted on origin, but "+tt.want+" and no merged pull request matches it; not deleted\n")
+			assertNotContains(t, "stderr", res.stderr, "couldn't look up")
+			assertNotContains(t, "stdout", res.stdout, "branch feature")
 			f.assertBranchAt("feature", tip)
 		})
 	}
+}
+
+// TestRunKeepsBranchWhenPRLookupFails checks that a failed lookup keeps the
+// branches with a warning each, and that the reason is printed as a warning
+// before them: once, even when the branches span several requests that fail
+// the same way.
+func TestRunKeepsBranchWhenPRLookupFails(t *testing.T) {
+	f := newSyncFixture(t)
+	f.pushUpstreamBranch("feature", "feature-1")
+	tip := f.sha(f.upstream, "feature")
+	// One more remote branch than fits in a single request.
+	var branches, pushSpecs, deleteSpecs []string
+	for i := range mergedPRChunkSize + 1 {
+		branch := fmt.Sprintf("topic-%02d", i)
+		branches = append(branches, branch)
+		pushSpecs = append(pushSpecs, "feature:refs/heads/"+branch)
+		deleteSpecs = append(deleteSpecs, ":refs/heads/"+branch)
+	}
+	f.upstreamGit(append([]string{"push", "--quiet", "origin"}, pushSpecs...)...)
+	f.localGit("fetch", "--quiet", "origin")
+	for _, branch := range branches {
+		f.localGit("branch", "--quiet", "--track", branch, "origin/"+branch)
+	}
+	f.upstreamGit(append([]string{"push", "--quiet", "origin"}, deleteSpecs...)...)
+
+	calls := 0
+	f.findMergedPRs = func(runConfig, Remote, string, []string) (map[string][]mergedPR, error) {
+		calls++
+		return nil, errors.New("gh: not logged in")
+	}
+	res := f.sync()
+	if res.err != nil {
+		t.Fatalf("run() error: %v", res.err)
+	}
+
+	if calls != 2 {
+		t.Errorf("findMergedPRs calls = %d, want 2", calls)
+	}
+	reason := "warning: couldn't look up merged pull requests: gh: not logged in\n"
+	if got := strings.Count(res.stderr, reason); got != 1 {
+		t.Errorf("stderr contains the lookup failure reason %d times, want 1:\n%s", got, res.stderr)
+	}
+	for _, branch := range branches {
+		kept := fmt.Sprintf("warning: '%s' was deleted on origin, but 1 commit is not in 'main' and pull requests couldn't be looked up; not deleted\n", branch)
+		assertContains(t, "stderr", res.stderr, kept)
+		if strings.Index(res.stderr, reason) > strings.Index(res.stderr, kept) {
+			t.Errorf("the lookup failure reason is printed after the warning for %s", branch)
+		}
+		f.assertBranchAt(branch, tip)
+	}
+	assertNotContains(t, "stdout", res.stdout, "branch topic-")
 }
 
 func TestBuildMergedPRQuery(t *testing.T) {
@@ -799,7 +929,7 @@ func TestBuildMergedPRQuery(t *testing.T) {
 		"repository(owner: $owner, name: $name) {",
 		"b0: pullRequests(headRefName: $h0, baseRefName: $base, states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {",
 		"b1: pullRequests(headRefName: $h1, baseRefName: $base, states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {",
-		"nodes { number headRefOid }",
+		"nodes { number headRefOid commits(last: 100) { nodes { commit { oid } } } }",
 	} {
 		assertContains(t, "query", query, want)
 	}
@@ -811,13 +941,15 @@ func TestBuildMergedPRQuery(t *testing.T) {
 func TestParseMergedPRResponse(t *testing.T) {
 	heads := []string{"feature", "fix"}
 	got, err := parseMergedPRResponse([]byte(`{"data":{"repository":{
-		"b0":{"nodes":[{"number":12,"headRefOid":"aaaa"},{"number":3,"headRefOid":"bbbb"}]},
+		"b0":{"nodes":[
+			{"number":12,"headRefOid":"aaaa","commits":{"nodes":[{"commit":{"oid":"cccc"}},{"commit":{"oid":"aaaa"}}]}},
+			{"number":3,"headRefOid":"bbbb","commits":{"nodes":[]}}]},
 		"b1":{"nodes":[]}}}}`), heads)
 	if err != nil {
 		t.Fatalf("parseMergedPRResponse() error: %v", err)
 	}
 	want := map[string][]mergedPR{
-		"feature": {{Number: 12, HeadRefOid: "aaaa"}, {Number: 3, HeadRefOid: "bbbb"}},
+		"feature": {{Number: 12, HeadRefOid: "aaaa", Commits: []string{"cccc", "aaaa"}}, {Number: 3, HeadRefOid: "bbbb"}},
 		"fix":     {},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -1423,7 +1555,7 @@ func TestRunSyncsBranchTrackingOtherRemote(t *testing.T) {
 		if res.err != nil {
 			t.Fatalf("run() error: %v", res.err)
 		}
-		assertContains(t, "stderr", res.stderr, "warning: 'topic' was deleted on fork, but appears not merged into 'main'")
+		assertContains(t, "stderr", res.stderr, "warning: 'topic' was deleted on fork, but 1 commit is not in 'main' and pull requests couldn't be looked up; not deleted")
 		f.assertBranchAt("topic", before)
 	})
 

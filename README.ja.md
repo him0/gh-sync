@@ -55,8 +55,9 @@ gh sync
 | 遅れている | fast-forward する: `Updated branch <name> (was <sha>).` |
 | 先行または分岐している | 残す: `warning: '<name>' seems to contain unpushed commits` |
 | upstream が削除済みで、全コミットがデフォルトブランチに含まれる | 削除する: `Deleted branch <name> (was <sha>).` |
-| upstream が削除済みで、先頭がマージ済み pull request の head と一致する(squash や rebase でのマージ) | 削除する: `Deleted branch <name> (was <sha>, merged via #<number>).` |
-| upstream が削除済みで、それ以外 | 残す: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
+| upstream が削除済みで、先頭がマージ済み pull request の head か、そのコミットのいずれかと一致する(squash や rebase でのマージ) | 削除する: `Deleted branch <name> (was <sha>, merged via #<number>).` |
+| upstream が削除済みで、マージ済み pull request の head の上にコミットを追加している | 残す: `warning: '<name>' was deleted on <remote>, but 2 commits were added after it was merged via #<number>; not deleted` |
+| upstream が削除済みで、それ以外 | 残す: `warning: '<name>' was deleted on <remote>, but 1 commit is not in '<default>' and no merged pull request matches it; not deleted` |
 | 最新、または remote に対応するブランチが無い | 何もしない |
 
 更新・削除したブランチが無く、警告も出なかった場合は、stderr が端末であれば `Already up to date.` と表示します。
@@ -65,7 +66,8 @@ gh sync
 
 - merge、rebase、強制更新、push は一切しません。ローカルにしか無いコミットを持つブランチは必ず残ります。
 - 削除されうるのは、upstream を git が prune した(`[gone]`)ブランチだけです。upstream を一度も設定していないブランチや、upstream が fetch refspec の対象外のブランチ(single-branch クローン、`gh pr checkout` による `refs/pull/<N>/head`)は削除しません。
-- マージ済み pull request は `gh api graphql` で 50 本ごとに 1 リクエストで確認します。確認できない場合(`gh` が未認証、GitHub 以外の remote、API エラー、30 秒のタイムアウト)はブランチを残し、理由は `--verbose` で表示します。`~/.ssh/config` のホストエイリアスや `ssh.github.com` は `ssh -G` で解決します。
+- マージ済み pull request より遅れているブランチ(GitHub の「Update branch」や、ほかの場所からの push があった場合)も削除します。そのコミットはすべて pull request に含まれているためです。確認するのは pull request の最後の 100 コミットだけで、追加の fetch はしません。
+- マージ済み pull request は `gh api graphql` で 50 本ごとに 1 リクエストで確認します。確認できない場合(`gh` が未認証、GitHub 以外の remote、API エラー、30 秒のタイムアウト)は `... and pull requests couldn't be looked up; not deleted` と警告してブランチを残し、理由を `warning: couldn't look up merged pull requests: <reason>` として一度だけ表示します。`~/.ssh/config` のホストエイリアスや `ssh.github.com` は `ssh -G` で解決します。
 - 削除するブランチをチェックアウト中の場合は、先にデフォルトブランチへ切り替えます(`Switched to branch ...`)。ローカルに無ければ main remote から作成します。
 - 別の worktree でチェックアウトされているブランチは、警告を出してスキップします。
 
@@ -112,6 +114,9 @@ main remote に使える `HEAD`、`main`、`master` がありません。`git re
 
 **`warning: '<name>' upstream config is broken; skipping`**
 `branch.<name>.merge` が無いか、不正です。`git branch --set-upstream-to=<remote>/<branch> <name>` で直してください。
+
+**`warning: couldn't look up merged pull requests: <reason>`**
+確認できるようになるまで、コミットがデフォルトブランチに含まれないブランチは残ります。`gh auth status` を確認してください。GitHub 以外の remote は確認できません。
 
 バグを報告するときは、`gh sync --version` と `gh sync --verbose` の出力を添えてください。
 

@@ -55,8 +55,9 @@ gh sync
 | Behind | Fast-forwarded: `Updated branch <name> (was <sha>).` |
 | Ahead or diverged | Kept: `warning: '<name>' seems to contain unpushed commits` |
 | Upstream deleted, all commits in the default branch | Deleted: `Deleted branch <name> (was <sha>).` |
-| Upstream deleted, tip is the head of a merged pull request (squash or rebase merge) | Deleted: `Deleted branch <name> (was <sha>, merged via #<number>).` |
-| Upstream deleted, otherwise | Kept: `warning: '<name>' was deleted on <remote>, but appears not merged into '<default>'` |
+| Upstream deleted, tip is the head or one of the commits of a merged pull request (squash or rebase merge) | Deleted: `Deleted branch <name> (was <sha>, merged via #<number>).` |
+| Upstream deleted, commits added on top of a merged pull request's head | Kept: `warning: '<name>' was deleted on <remote>, but 2 commits were added after it was merged via #<number>; not deleted` |
+| Upstream deleted, otherwise | Kept: `warning: '<name>' was deleted on <remote>, but 1 commit is not in '<default>' and no merged pull request matches it; not deleted` |
 | Up to date, or no counterpart on the remote | Nothing |
 
 When no branch was updated or deleted and no warning was printed, gh-sync prints `Already up to date.` to stderr if it is a terminal.
@@ -65,7 +66,8 @@ When no branch was updated or deleted and no warning was printed, gh-sync prints
 
 - gh-sync never merges, rebases, force-updates or pushes. A branch with local-only commits is always kept.
 - Only a branch whose upstream git pruned (`[gone]`) can be deleted. Branches that never had an upstream, or whose upstream is outside the fetch refspec (a single-branch clone, `refs/pull/<N>/head` from `gh pr checkout`), are never deleted.
-- Merged pull requests are looked up with `gh api graphql`, one request per 50 branches. When that fails (`gh` not authenticated, a remote not on GitHub, an API error, a 30-second timeout), the branch is kept; `--verbose` shows why. SSH host aliases from `~/.ssh/config` and `ssh.github.com` are resolved with `ssh -G`.
+- A branch that is behind its merged pull request (GitHub's "Update branch", a commit pushed from elsewhere) is deleted too: all its commits are in the pull request. Only the last 100 commits of a pull request are checked, and nothing extra is fetched.
+- Merged pull requests are looked up with `gh api graphql`, one request per 50 branches. When that fails (`gh` not authenticated, a remote not on GitHub, an API error, a 30-second timeout), the branch is kept with `... and pull requests couldn't be looked up; not deleted`, and the reason is printed once as `warning: couldn't look up merged pull requests: <reason>`. SSH host aliases from `~/.ssh/config` and `ssh.github.com` are resolved with `ssh -G`.
 - If the branch to delete is checked out, gh-sync first switches to the default branch (`Switched to branch ...`), creating it from the main remote if needed.
 - A branch checked out in another worktree is skipped with a warning.
 
@@ -112,6 +114,9 @@ Local changes in the checked-out branch would be overwritten. Commit or stash th
 
 **`warning: '<name>' upstream config is broken; skipping`**
 `branch.<name>.merge` is missing or invalid. Fix it with `git branch --set-upstream-to=<remote>/<branch> <name>`.
+
+**`warning: couldn't look up merged pull requests: <reason>`**
+Branches whose commits are not in the default branch are kept until the lookup works. Check `gh auth status`; a remote that is not on GitHub can't be looked up.
 
 When reporting a bug, please include the output of `gh sync --version` and `gh sync --verbose`.
 

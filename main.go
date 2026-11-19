@@ -98,18 +98,21 @@ type syncReport struct {
 	warned  bool // a warning was printed
 }
 
-// mergedPR is a merged pull request and the commit its head pointed to.
+// mergedPR is a merged pull request, the commit its head pointed to and its
+// commits (at most the last mergedPRCommitLimit of them).
 type mergedPR struct {
-	Number     int    `json:"number"`
-	HeadRefOid string `json:"headRefOid"`
+	Number     int
+	HeadRefOid string
+	Commits    []string
 }
 
 // mergedPRFinder returns, for each name in heads, the pull requests merged
 // into base in remote's repository from a branch with that name. Branch names
 // are matched without an owner, so pull requests opened from forks are
-// included; the caller only accepts one whose head commit equals the local
-// tip. An error means the lookup could not be done (gh missing or not
-// authenticated, a remote that is not on GitHub, an API error, a timeout).
+// included; the caller only accepts one that contains the local tip (see
+// matchMergedPR). An error means the lookup could not be done (gh missing or
+// not authenticated, a remote that is not on GitHub, an API error, a
+// timeout).
 type mergedPRFinder func(cfg runConfig, remote Remote, base string, heads []string) (map[string][]mergedPR, error)
 
 func main() {
@@ -270,14 +273,14 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 	// Gone branches whose commits are not in the default branch are looked
 	// up together, so the number of gh requests doesn't grow with them.
 	if len(candidates) > 0 {
-		merged := lookupMergedPRs(cfg, *remote, defaultBranch, candidates)
+		matches := lookupMergedPRs(cfg, *remote, defaultBranch, candidates)
 		for _, c := range candidates {
-			pr := merged[c.branch]
-			if pr == 0 {
-				printWarning(cfg, "'%s' was deleted on %s, but appears not merged into '%s'", c.branch, branchToRemote[c.branch], defaultBranch)
+			m := matches[c.branch]
+			if m.outcome != prMerged {
+				printWarning(cfg, "'%s' was deleted on %s, but %s; not deleted", c.branch, branchToRemote[c.branch], keptReason(c, m, defaultBranch))
 				continue
 			}
-			if derr := deleteBranch(cfg, c.branch, c.tip, c.worktreePath, fmt.Sprintf(", merged via #%d", pr), &currentBranch, remote.Name, defaultBranch); derr != nil {
+			if derr := deleteBranch(cfg, c.branch, c.tip, c.worktreePath, fmt.Sprintf(", merged via #%d", m.number), &currentBranch, remote.Name, defaultBranch); derr != nil {
 				hadFailure = true
 			}
 		}
@@ -826,7 +829,7 @@ func processBranch(cfg runConfig, b localBranch, remoteRefs map[string]bool, rem
 	if ahead != 0 {
 		// The commits are not in the default branch, which is also the case
 		// after a squash or rebase merge.
-		*candidates = append(*candidates, squashCandidate{branch: branch, tip: b.tip, worktreePath: b.worktreePath})
+		*candidates = append(*candidates, squashCandidate{branch: branch, tip: b.tip, worktreePath: b.worktreePath, ahead: ahead})
 		return nil
 	}
 	return deleteBranch(cfg, branch, b.tip, b.worktreePath, "", currentBranch, remote.Name, defaultBranch)
@@ -888,21 +891,51 @@ func checkoutDefaultBranchArgs(remoteName, defaultBranch string) []string {
 
 // squashCandidate is a gone branch whose commits are not in the default
 // branch. It is deleted only if a pull request merged into the default branch
-// has its tip as head commit.
+// contains its tip (see matchMergedPR).
 type squashCandidate struct {
 	branch       string
 	tip          string
 	worktreePath string
+	ahead        int // commits that are not in the default branch
+}
+
+// prOutcome says what the pull request lookup found for a candidate branch.
+type prOutcome int
+
+const (
+	// prNoMatch: no merged pull request contains the tip or has a head that
+	// is an ancestor of it. The branch is kept.
+	prNoMatch prOutcome = iota
+	// prMerged: the tip is the head or one of the commits of a merged pull
+	// request. The branch is deleted.
+	prMerged
+	// prCommitsAdded: the tip descends from the head of a merged pull
+	// request, so commits were added locally after the merge. The branch is
+	// kept.
+	prCommitsAdded
+	// prLookupFailed: the pull requests could not be looked up. The branch
+	// is kept.
+	prLookupFailed
+)
+
+// prMatch is the result of the pull request lookup for one candidate branch.
+type prMatch struct {
+	outcome prOutcome
+	number  int // the pull request, for prMerged and prCommitsAdded
+	added   int // commits after the pull request head, for prCommitsAdded
 }
 
 // mergedPRChunkSize caps how many branch names one GraphQL request looks up.
 const mergedPRChunkSize = 50
 
-// lookupMergedPRs maps each candidate branch to the number of a pull request
-// merged into base whose head commit is the branch tip. Branches without one,
-// or whose lookup failed, are absent; the caller keeps them with the usual
-// warning. Failures are only reported with --verbose.
-func lookupMergedPRs(cfg runConfig, remote Remote, base string, candidates []squashCandidate) map[string]int {
+// lookupMergedPRs returns, for each candidate branch, how it relates to the
+// pull requests merged into base from its upstream branch.
+//
+// A failed request is reported here with a warning, once per distinct reason,
+// so the reason precedes the per-branch warnings the caller prints. A branch
+// whose upstream name can't be read is only reported with --verbose: that is
+// a problem with the branch's config, not with the lookup as a whole.
+func lookupMergedPRs(cfg runConfig, remote Remote, base string, candidates []squashCandidate) map[string]prMatch {
 	// The upstream ref is gone, so @{upstream} can't be resolved; the branch
 	// name on the remote (which may differ from the local name) is still in
 	// branch.<name>.merge. Two local branches may track the same one.
@@ -922,28 +955,40 @@ func lookupMergedPRs(cfg runConfig, remote Remote, base string, candidates []squ
 		}
 	}
 
+	// found gets an entry for every head of a chunk that was looked up, even
+	// when it has no pull requests, so a missing entry means a failed lookup.
 	found := make(map[string][]mergedPR)
+	reported := make(map[string]bool)
 	for start := 0; start < len(heads); start += mergedPRChunkSize {
 		chunk := heads[start:min(start+mergedPRChunkSize, len(heads))]
 		prs, err := cfg.findMergedPRs(cfg, remote, base, chunk)
 		if err != nil {
-			printNote(cfg, "couldn't look up merged pull requests: %s", err.Error())
+			if reason := err.Error(); !reported[reason] {
+				reported[reason] = true
+				printWarning(cfg, "couldn't look up merged pull requests: %s", reason)
+			}
 			continue
 		}
-		maps.Copy(found, prs)
+		for _, head := range chunk {
+			found[head] = prs[head]
+		}
 	}
 
-	merged := make(map[string]int)
+	matches := make(map[string]prMatch, len(candidates))
 	for _, c := range candidates {
 		head, ok := headOf[c.branch]
 		if !ok {
+			matches[c.branch] = prMatch{outcome: prLookupFailed}
 			continue
 		}
-		if pr := matchMergedPR(found[head], c.tip); pr != 0 {
-			merged[c.branch] = pr
+		prs, ok := found[head]
+		if !ok {
+			matches[c.branch] = prMatch{outcome: prLookupFailed}
+			continue
 		}
+		matches[c.branch] = matchMergedPR(prs, c.tip)
 	}
-	return merged
+	return matches
 }
 
 // upstreamBranchName returns the remote branch name that branch tracks, read
@@ -961,20 +1006,86 @@ func upstreamBranchName(branch string) (string, error) {
 	return name, nil
 }
 
-// matchMergedPR returns the number of the pull request in prs whose head
-// commit is tip, or 0 when there is none. A pull request whose head differs
-// (commits were added after the merge) does not count.
-func matchMergedPR(prs []mergedPR, tip string) int {
+// matchMergedPR decides what the merged pull requests prs mean for a branch
+// at tip.
+//
+// The branch counts as merged when tip is the head of a pull request or one
+// of its commits. In the second case the local branch is merely behind the
+// pull request head (GitHub's "Update branch", or a commit pushed from
+// elsewhere before the merge): every local commit is part of the merged pull
+// request, so deleting is as safe as fast-forwarding first would have been.
+//
+// Otherwise, a pull request whose head is an ancestor of tip means commits
+// were added locally after the merge; the first such pull request is
+// reported. A merged match on any pull request wins over that.
+func matchMergedPR(prs []mergedPR, tip string) prMatch {
 	for _, pr := range prs {
-		if pr.HeadRefOid == tip {
-			return pr.Number
+		if pr.HeadRefOid == tip || slices.Contains(pr.Commits, tip) {
+			return prMatch{outcome: prMerged, number: pr.Number}
 		}
 	}
-	return 0
+	for _, pr := range prs {
+		if added := commitsAddedAfter(pr.HeadRefOid, tip); added > 0 {
+			return prMatch{outcome: prCommitsAdded, number: pr.Number, added: added}
+		}
+	}
+	return prMatch{outcome: prNoMatch}
 }
 
-// ghTimeout bounds each gh call so a stalled network request falls back to
-// the "appears not merged" warning instead of hanging the sync.
+// commitsAddedAfter returns how many commits tip has on top of head, or 0
+// when head is not an ancestor of tip. A head that is missing locally can't
+// be an ancestor of tip, and is not fetched to find out.
+func commitsAddedAfter(head, tip string) int {
+	// head comes from the API response: don't let git read it as an option.
+	if head == "" || strings.HasPrefix(head, "-") {
+		return 0
+	}
+	// In a partial clone, asking for a missing object makes git fetch it
+	// from the promisor remote; GIT_NO_LAZY_FETCH (Git 2.45+) prevents that.
+	exists := exec.Command("git", "cat-file", "-e", head+"^{commit}")
+	exists.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1")
+	if exists.Run() != nil {
+		return 0
+	}
+	if exec.Command("git", "merge-base", "--is-ancestor", head, tip).Run() != nil {
+		return 0
+	}
+	output, err := gitOutput("rev-list", "--count", head+".."+tip, "--")
+	if err != nil {
+		return 0
+	}
+	added, err := strconv.Atoi(strings.TrimSpace(string(output)))
+	if err != nil {
+		return 0
+	}
+	return added
+}
+
+// keptReason returns the part of the warning that says why candidate c is
+// kept, for a pull request lookup result m other than prMerged.
+func keptReason(c squashCandidate, m prMatch, defaultBranch string) string {
+	notInDefault := fmt.Sprintf("%s not in '%s'", pluralize(c.ahead, "commit is", "commits are"), defaultBranch)
+	switch m.outcome {
+	case prCommitsAdded:
+		return fmt.Sprintf("%s added after it was merged via #%d", pluralize(m.added, "commit was", "commits were"), m.number)
+	case prLookupFailed:
+		return notInDefault + " and pull requests couldn't be looked up"
+	default:
+		return notInDefault + " and no merged pull request matches it"
+	}
+}
+
+// pluralize returns "<n> <singular>" when n is 1 and "<n> <plural>"
+// otherwise.
+func pluralize(n int, singular, plural string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, singular)
+	}
+	return fmt.Sprintf("%d %s", n, plural)
+}
+
+// ghTimeout bounds each gh call so a stalled network request ends as a failed
+// lookup, which keeps the branch with a warning, instead of hanging the sync.
 const ghTimeout = 30 * time.Second
 
 // findMergedPRsWithGh implements mergedPRFinder with one `gh api graphql`
@@ -1013,9 +1124,15 @@ type queryVar struct {
 	value string
 }
 
+// mergedPRCommitLimit caps how many commits are requested per pull request,
+// counted back from its head. A local tip further behind than that is not
+// recognized as part of the pull request, and the branch is kept.
+const mergedPRCommitLimit = 100
+
 // buildMergedPRQuery builds a GraphQL query with one aliased pullRequests
 // field per head (b0, b1, ...), restricted to pull requests merged into base,
-// most recently updated first. Branch names only appear as variables.
+// most recently updated first, each with its last commits. Branch names only
+// appear as variables.
 func buildMergedPRQuery(repo gitHubRepo, base string, heads []string) (string, []queryVar) {
 	vars := []queryVar{{"owner", repo.owner}, {"name", repo.name}, {"base", base}}
 	params := []string{"$owner: String!", "$name: String!", "$base: String!"}
@@ -1023,10 +1140,23 @@ func buildMergedPRQuery(repo gitHubRepo, base string, heads []string) (string, [
 	for i, head := range heads {
 		vars = append(vars, queryVar{fmt.Sprintf("h%d", i), head})
 		params = append(params, fmt.Sprintf("$h%d: String!", i))
-		fmt.Fprintf(&fields, "    b%d: pullRequests(headRefName: $h%d, baseRefName: $base, states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {\n      nodes { number headRefOid }\n    }\n", i, i)
+		fmt.Fprintf(&fields, "    b%d: pullRequests(headRefName: $h%d, baseRefName: $base, states: MERGED, first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {\n      nodes { number headRefOid commits(last: %d) { nodes { commit { oid } } } }\n    }\n", i, i, mergedPRCommitLimit)
 	}
 	query := fmt.Sprintf("query(%s) {\n  repository(owner: $owner, name: $name) {\n%s  }\n}\n", strings.Join(params, ", "), fields.String())
 	return query, vars
+}
+
+// mergedPRNode is a pull request in the shape buildMergedPRQuery asks for.
+type mergedPRNode struct {
+	Number     int    `json:"number"`
+	HeadRefOid string `json:"headRefOid"`
+	Commits    struct {
+		Nodes []struct {
+			Commit struct {
+				Oid string `json:"oid"`
+			} `json:"commit"`
+		} `json:"nodes"`
+	} `json:"commits"`
 }
 
 // parseMergedPRResponse maps the b<i> aliases of a buildMergedPRQuery
@@ -1035,7 +1165,7 @@ func parseMergedPRResponse(output []byte, heads []string) (map[string][]mergedPR
 	var resp struct {
 		Data struct {
 			Repository map[string]*struct {
-				Nodes []mergedPR `json:"nodes"`
+				Nodes []mergedPRNode `json:"nodes"`
 			} `json:"repository"`
 		} `json:"data"`
 		Errors []struct {
@@ -1057,7 +1187,15 @@ func parseMergedPRResponse(output []byte, heads []string) (map[string][]mergedPR
 		if field == nil {
 			return nil, fmt.Errorf("missing b%d in gh api graphql output", i)
 		}
-		prs[head] = field.Nodes
+		list := make([]mergedPR, 0, len(field.Nodes))
+		for _, node := range field.Nodes {
+			pr := mergedPR{Number: node.Number, HeadRefOid: node.HeadRefOid}
+			for _, c := range node.Commits.Nodes {
+				pr.Commits = append(pr.Commits, c.Commit.Oid)
+			}
+			list = append(list, pr)
+		}
+		prs[head] = list
 	}
 	return prs, nil
 }
