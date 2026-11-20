@@ -271,6 +271,10 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		printError(cfg.stderrColors, "%s", err.Error())
 		return err
 	}
+	if err := checkRemoteName(remote.Name); err != nil {
+		printError(cfg.stderrColors, "fatal: %s", err.Error())
+		return err
+	}
 
 	currentBranch := ""
 	if branch, err := getCurrentBranch(); err == nil {
@@ -367,13 +371,27 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 // fetchRemote runs `git fetch --prune` for name. --progress only shows
 // something when git's stderr reaches the user, so stderr is passed through
 // when it is a terminal. Otherwise it is captured, so a failure is reported
-// once, inside the returned error.
+// once, inside the returned error. A name checkRemoteName rejects is not
+// passed to git.
 func fetchRemote(cfg runConfig, name string, stderrIsTerminal bool) error {
+	if err := checkRemoteName(name); err != nil {
+		return err
+	}
 	args := []string{"fetch", "--prune", "--quiet", "--progress", name}
 	if stderrIsTerminal {
 		return runGitStderr(cfg, args...)
 	}
 	return runGitSilent(cfg, args...)
+}
+
+// checkRemoteName rejects a remote name git would read as an option: git
+// allows names such as "--upload-pack=<command>", and `git fetch` given one
+// runs that command. --end-of-options would need git 2.24.
+func checkRemoteName(name string) error {
+	if strings.HasPrefix(name, "-") {
+		return fmt.Errorf("remote name '%s' starts with '-'", name)
+	}
+	return nil
 }
 
 // trackedRemotes returns, sorted, the remotes other than main that some

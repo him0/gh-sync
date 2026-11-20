@@ -1327,6 +1327,72 @@ func TestRunRejectsInvalidOptions(t *testing.T) {
 	}
 }
 
+// TestRunRejectsDashRemoteNames checks that a remote whose name starts with
+// "-" is never passed to git fetch, which would read it as an option
+// (--upload-pack=<command> runs that command). As the main remote it stops
+// gh-sync before anything is synced; as another remote a branch tracks it is
+// handled like a remote that can't be fetched.
+func TestRunRejectsDashRemoteNames(t *testing.T) {
+	const dashName = "--upload-pack=gh-sync-test"
+	const wantReason = "remote name '" + dashName + "' starts with '-'"
+
+	mainTests := []struct {
+		name string
+		// setup returns the arguments for run().
+		setup func(f *syncFixture) []string
+	}{
+		{"given with --remote", func(f *syncFixture) []string {
+			f.localGit("remote", "add", "--", dashName, f.remote)
+			return []string{"--remote=" + dashName}
+		}},
+		{"automatically chosen", func(f *syncFixture) []string {
+			f.localGit("remote", "add", "--", dashName, f.remote)
+			f.localGit("remote", "remove", "origin")
+			return nil
+		}},
+	}
+	for _, tt := range mainTests {
+		t.Run("main remote "+tt.name, func(t *testing.T) {
+			f := newSyncFixture(t)
+			before := f.sha(f.local, "main")
+			f.advanceUpstream("main", "upstream-1")
+			args := tt.setup(f)
+
+			res := f.sync(args...)
+			if res.err == nil {
+				t.Fatal("run() error = nil, want an error")
+			}
+			assertContains(t, "stderr", res.stderr, "fatal: "+wantReason)
+			assertNotContains(t, "stderr", res.stderr, "Failed to fetch")
+			f.assertBranchAt("main", before)
+		})
+	}
+
+	// The branches tracking it are skipped with a warning and the exit
+	// status is 1; the main remote's branches are still synced.
+	t.Run("remote tracked by a branch", func(t *testing.T) {
+		f := newSyncFixture(t)
+		fork := f.addForkRemote()
+		f.pushForkBranch("topic", "topic-1")
+		before := f.sha(f.local, "topic")
+		// Deleted on the fork and merged: a successful fetch would delete it.
+		f.mergeIntoUpstreamMain("topic")
+		f.upstreamGit("push", "--quiet", "fork", "--delete", "topic")
+		f.localGit("remote", "add", "--", dashName, fork)
+		f.localGit("config", "--", "branch.topic.remote", dashName)
+		mainBefore := f.sha(f.local, "main")
+
+		res := f.sync()
+		if res.err == nil {
+			t.Fatal("run() error = nil, want an error")
+		}
+		assertContains(t, "stderr", res.stderr, "warning: couldn't fetch "+dashName+"; skipping the branches that track it: "+wantReason)
+		assertContains(t, "stdout", res.stdout, fmt.Sprintf("Updated branch main (was %s).", shortSHA(mainBefore)))
+		assertNotContains(t, "stdout", res.stdout, "topic")
+		f.assertBranchAt("topic", before)
+	})
+}
+
 // TestRunExclude checks that branches matching an exclude pattern, from
 // --exclude or gh-sync.exclude, are neither updated nor deleted, while other
 // branches still are.
