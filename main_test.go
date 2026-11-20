@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // TestMain isolates every git invocation in this package (including the ones
@@ -964,6 +965,47 @@ func TestParseMergedPRResponse(t *testing.T) {
 	} {
 		if _, err := parseMergedPRResponse([]byte(output), heads); err == nil {
 			t.Errorf("%s: want error", name)
+		}
+	}
+
+	// A message from the server can't carry escape sequences to the terminal.
+	_, err = parseMergedPRResponse([]byte(`{"errors":[{"message":"\u001b[2K\u001b[1Aall good\u009b31m\u0007"}]}`), heads)
+	if err == nil {
+		t.Fatal("GraphQL error with escape sequences: want error")
+	}
+	if want := `GraphQL error: \x1b[2K\x1b[1Aall good\u009b31m\a`; err.Error() != want {
+		t.Errorf("parseMergedPRResponse() error = %q, want %q", err.Error(), want)
+	}
+	if i := strings.IndexFunc(err.Error(), unicode.IsControl); i >= 0 {
+		t.Errorf("parseMergedPRResponse() error keeps a control character at %d: %q", i, err.Error())
+	}
+}
+
+func TestSanitizeForTerminal(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "Something went wrong", "Something went wrong"},
+		{"non-ASCII", "リポジトリが見つかりません — café ✓", "リポジトリが見つかりません — café ✓"},
+		{"quotes and backslashes", `Could not resolve "a\b"`, `Could not resolve "a\b"`},
+		{"lines and tabs", "first\n\tsecond\r\nthird", "first\n\tsecond\nthird"},
+		{"ESC sequence", "\x1b[31mred\x1b[0m", `\x1b[31mred\x1b[0m`},
+		{"OSC title", "\x1b]0;title\a", `\x1b]0;title\a`},
+		{"carriage return", "real\rfake", `real\rfake`},
+		{"backspace and NUL", "a\b\x00", `a\b\x00`},
+		{"DEL", "a\x7f", `a\x7f`},
+		{"C1 CSI", "\u009b31m", `\u009b31m`},
+		{"raw C1 byte", "\x9b31m", "\ufffd31m"},
+	}
+	for _, tt := range tests {
+		got := sanitizeForTerminal(tt.in)
+		if got != tt.want {
+			t.Errorf("%s: sanitizeForTerminal(%q) = %q, want %q", tt.name, tt.in, got, tt.want)
+		}
+		if i := strings.IndexFunc(strings.NewReplacer("\n", "", "\t", "").Replace(got), unicode.IsControl); i >= 0 {
+			t.Errorf("%s: sanitizeForTerminal(%q) keeps a control character: %q", tt.name, tt.in, got)
 		}
 	}
 }

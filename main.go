@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/mattn/go-isatty"
 )
@@ -1443,7 +1444,8 @@ func findMergedPRsWithGh(cfg runConfig, remote Remote, base string, heads []stri
 		return nil, fmt.Errorf("gh api graphql: timed out after %s", ghTimeout)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("gh api graphql: %w", err)
+		// gh's stderr quotes the server's error body.
+		return nil, fmt.Errorf("gh api graphql: %s", sanitizeForTerminal(err.Error()))
 	}
 	return parseMergedPRResponse(output, heads)
 }
@@ -1506,7 +1508,7 @@ func parseMergedPRResponse(output []byte, heads []string) (map[string][]mergedPR
 		return nil, fmt.Errorf("unexpected gh api graphql output: %w", err)
 	}
 	if len(resp.Errors) > 0 {
-		return nil, fmt.Errorf("GraphQL error: %s", resp.Errors[0].Message)
+		return nil, fmt.Errorf("GraphQL error: %s", sanitizeForTerminal(resp.Errors[0].Message))
 	}
 	if resp.Data.Repository == nil {
 		return nil, errors.New("repository not found")
@@ -1528,6 +1530,26 @@ func parseMergedPRResponse(output []byte, heads []string) (map[string][]mergedPR
 		prs[head] = list
 	}
 	return prs, nil
+}
+
+// sanitizeForTerminal makes text that came from a server safe to print: control
+// characters (C0 including ESC, DEL and C1) are shown as Go escapes such as
+// \x1b, so a response can't move the cursor, recolor or erase what the terminal
+// shows. Line breaks and tabs are kept, and so is every other character, so an
+// ordinary message reads as it was sent. Bytes that aren't valid UTF-8 become
+// U+FFFD.
+func sanitizeForTerminal(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			quoted := strconv.QuoteRune(r)
+			b.WriteString(quoted[1 : len(quoted)-1])
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // gitHubRepo identifies a repository on a GitHub host (github.com or GitHub
