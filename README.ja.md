@@ -59,6 +59,8 @@ upstream が削除されたブランチは、次のどちらかに当てはま�
 
 pull request は `gh api graphql` で確認します。確認するのは各 pull request の最後の 100 コミットだけで、追加の fetch はしません。確認できなかった場合、その結果が必要なブランチは残します。[トラブルシューティング](#トラブルシューティング)を参照してください。
 
+`gh` を呼ぶのは、github.com、`*.ghe.com`、`GH_HOST` のホスト、`gh auth login` でログイン済みのホストだけです。それ以外のホストの remote には、`GH_ENTERPRISE_TOKEN` のものも含めてトークンを送りません。
+
 ### 安全性
 
 - merge、rebase、強制更新、push は一切しません。ローカルにしか無いコミットを持つブランチは必ず残ります。
@@ -154,7 +156,7 @@ main remote に使える `HEAD`、`main`、`master` がありません。`git re
 `branch.<name>.merge` が無いか、不正です。`git branch --set-upstream-to=<remote>/<branch> <name>` で直してください。
 
 **`warning: couldn't look up merged pull requests: <reason>`**
-`gh` が未認証か、remote が GitHub 上に無いか、API が失敗したか 30 秒以内に応答しませんでした。確認できるようになるまで、コミットがデフォルトブランチに含まれないブランチは `... and pull requests couldn't be looked up; not deleted` と警告して残します。`gh auth status` を確認してください。`~/.ssh/config` のホストエイリアスや `ssh.github.com` は `ssh -G` で解決します。
+`gh` が未認証か、remote が GitHub 上に無いか、API が失敗したか 30 秒以内に応答しませんでした。確認できるようになるまで、コミットがデフォルトブランチに含まれないブランチは `... and pull requests couldn't be looked up; not deleted` と警告して残します。`gh auth status` を確認してください。GitHub Enterprise Server の場合は、`gh auth login --hostname <host>` でログインするか、`GH_HOST` でそのホストを指定する必要があります。`GH_ENTERPRISE_TOKEN` のトークンだけでは確認しません。`~/.ssh/config` のホストエイリアスや `ssh.github.com` は `ssh -G` で解決します。
 
 バグを報告するときは、`gh sync --version` と `gh sync --verbose` の出力を添えてください。
 

@@ -59,6 +59,8 @@ A branch with commits added on top of a merged pull request's head is kept.
 
 Pull requests are looked up with `gh api graphql`. Only the last 100 commits of each are checked, and nothing extra is fetched. If the lookup fails, the branches that depend on it are kept; see [Troubleshooting](#troubleshooting).
 
+`gh` is only called for github.com, `*.ghe.com`, the host in `GH_HOST`, and hosts you logged in to with `gh auth login`. A remote on any other host is never sent a token, including one from `GH_ENTERPRISE_TOKEN`.
+
 ### Safety
 
 - gh-sync never merges, rebases, force-updates or pushes. A branch with local-only commits is always kept.
@@ -154,7 +156,7 @@ Local changes in the checked-out branch would be overwritten. Commit or stash th
 `branch.<name>.merge` is missing or invalid. Fix it with `git branch --set-upstream-to=<remote>/<branch> <name>`.
 
 **`warning: couldn't look up merged pull requests: <reason>`**
-`gh` is not authenticated, the remote is not on GitHub, or the API failed or took more than 30 seconds. Branches whose commits are not in the default branch are kept, with `... and pull requests couldn't be looked up; not deleted`, until the lookup works. Check `gh auth status`. SSH host aliases from `~/.ssh/config` and `ssh.github.com` are resolved with `ssh -G`.
+`gh` is not authenticated, the remote is not on GitHub, or the API failed or took more than 30 seconds. Branches whose commits are not in the default branch are kept, with `... and pull requests couldn't be looked up; not deleted`, until the lookup works. Check `gh auth status`. For GitHub Enterprise Server, the host must be logged in to with `gh auth login --hostname <host>` or named by `GH_HOST`; a token in `GH_ENTERPRISE_TOKEN` alone is not enough. SSH host aliases from `~/.ssh/config` and `ssh.github.com` are resolved with `ssh -G`.
 
 When reporting a bug, please include the output of `gh sync --version` and `gh sync --verbose`.
 

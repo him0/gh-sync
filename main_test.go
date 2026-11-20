@@ -2329,3 +2329,77 @@ func TestRunSkipsUpstreamOutsideFetchRefspec(t *testing.T) {
 		}
 	}
 }
+
+func TestIsGitHubCloudHost(t *testing.T) {
+	tests := []struct {
+		host string
+		want bool
+	}{
+		{"github.com", true},
+		{"GitHub.com", true},
+		{"gist.github.com", true},
+		{"acme.ghe.com", true},
+		{"github.example.com", false},
+		{"gitlab.com", false},
+		{"evilgithub.com", false},
+		{"github.com.evil.example", false},
+		{"ghe.com.evil.example", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isGitHubCloudHost(tt.host); got != tt.want {
+			t.Errorf("isGitHubCloudHost(%q) = %v, want %v", tt.host, got, tt.want)
+		}
+	}
+}
+
+func TestWithoutEnvVars(t *testing.T) {
+	env := []string{"PATH=/bin", "GH_TOKEN=a", "gh_enterprise_token=b", "GH_TOKEN_OTHER=c", "GITHUB_ENTERPRISE_TOKEN=d=e"}
+	got := withoutEnvVars(env, ghTokenEnvVars)
+	want := []string{"PATH=/bin", "GH_TOKEN_OTHER=c"}
+	if !slices.Equal(got, want) {
+		t.Errorf("withoutEnvVars = %q, want %q", got, want)
+	}
+}
+
+func TestCheckGhHost(t *testing.T) {
+	// An empty PATH makes `gh auth token` fail, as it does for a host gh has
+	// no stored credentials for: a token in the environment must not make an
+	// arbitrary host acceptable.
+	t.Setenv("PATH", "")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "token")
+	t.Setenv("GH_HOST", "ghes.example.com")
+	tests := []struct {
+		host    string
+		wantErr bool
+	}{
+		{"github.com", false},
+		{"acme.ghe.com", false},
+		{"ghes.example.com", false},
+		{"GHES.example.com", false},
+		{"gitlab.com", true},
+	}
+	for _, tt := range tests {
+		cfg := runConfig{ghHosts: make(map[string]bool)}
+		if err := checkGhHost(cfg, tt.host); (err != nil) != tt.wantErr {
+			t.Errorf("checkGhHost(%q) error = %v, wantErr %v", tt.host, err, tt.wantErr)
+		}
+	}
+
+	// A cached answer is used without asking gh again.
+	cfg := runConfig{ghHosts: map[string]bool{"ghes2.example.com": true}}
+	if err := checkGhHost(cfg, "ghes2.example.com"); err != nil {
+		t.Errorf("checkGhHost with a cached host: %v", err)
+	}
+}
+
+func TestFindMergedPRsWithGhRejectsOtherHosts(t *testing.T) {
+	t.Setenv("PATH", "")
+	t.Setenv("GH_ENTERPRISE_TOKEN", "token")
+	t.Setenv("GH_HOST", "")
+	cfg := runConfig{sshHosts: make(map[string]string), ghHosts: make(map[string]bool)}
+	_, err := findMergedPRsWithGh(cfg, Remote{Name: "origin", URL: "https://gitlab.com/owner/repo.git"}, "main", []string{"feature"})
+	if err == nil || !strings.Contains(err.Error(), "not a GitHub host") {
+		t.Errorf("findMergedPRsWithGh error = %v, want a host rejection", err)
+	}
+}

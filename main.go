@@ -79,7 +79,7 @@ func newColorConfig(enabled bool) colorConfig {
 // are not in the default branch (squash or rebase merges). Tests stub it.
 //
 // sshHosts caches the host names resolved with `ssh -G`, so ssh runs at most
-// once per host per sync.
+// once per host per sync. ghHosts does the same for checkGhHost.
 //
 // removeWorktrees makes deleteBranch remove the worktree of a branch it is
 // about to delete, when git agrees to without --force, instead of keeping the
@@ -96,6 +96,7 @@ type runConfig struct {
 	removeWorktrees bool
 	findMergedPRs   mergedPRFinder
 	sshHosts        map[string]string
+	ghHosts         map[string]bool
 	report          *syncReport
 }
 
@@ -238,6 +239,7 @@ func run(args []string, findMergedPRs mergedPRFinder) error {
 		dryRun:        dryRun,
 		findMergedPRs: findMergedPRs,
 		sshHosts:      make(map[string]string),
+		ghHosts:       make(map[string]bool),
 		report:        &syncReport{},
 	}
 
@@ -1422,6 +1424,9 @@ func findMergedPRsWithGh(cfg runConfig, remote Remote, base string, heads []stri
 		return nil, err
 	}
 	repo.host = resolveGitHubHost(cfg, remote.URL, repo.host)
+	if err := checkGhHost(cfg, repo.host); err != nil {
+		return nil, err
+	}
 	query, vars := buildMergedPRQuery(repo, base, heads)
 	args := []string{"api", "graphql", "--hostname", repo.host, "-F", "query=@-"}
 	for _, v := range vars {
@@ -1539,7 +1544,7 @@ var scpLikeURLRe = regexp.MustCompile(`^(?:[^@/]+@)?([^/:]+):(.+)$`)
 // parseGitHubURL extracts host, owner and repository name from a remote URL
 // in https, ssh, git or scp-like form. Local paths and URLs whose path is not
 // exactly "<owner>/<repo>" are rejected. Whether the host is actually a GitHub
-// host is left to gh, which fails for hosts it isn't authenticated to.
+// host is decided by checkGhHost.
 func parseGitHubURL(raw string) (gitHubRepo, error) {
 	var host, path string
 	if strings.Contains(raw, "://") {
@@ -1564,6 +1569,67 @@ func parseGitHubURL(raw string) (gitHubRepo, error) {
 		return gitHubRepo{}, fmt.Errorf("not a GitHub repository URL: %q", raw)
 	}
 	return gitHubRepo{host: host, owner: parts[0], name: parts[1]}, nil
+}
+
+// ghTokenEnvVars are the environment variables gh reads a token from.
+// GH_ENTERPRISE_TOKEN and GITHUB_ENTERPRISE_TOKEN apply to every host other
+// than github.com, whatever it is; in a codespace GITHUB_TOKEN does too.
+var ghTokenEnvVars = []string{"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
+
+// checkGhHost returns an error unless host is a GitHub host that gh may send
+// a token to. The host comes from the remote URL, which can be any git
+// server, and gh sends a token from the environment (see ghTokenEnvVars) to
+// any host it is asked to call. So gh is only called for:
+//
+//   - github.com and GitHub Enterprise Cloud with data residency (*.ghe.com),
+//   - the host named by GH_HOST,
+//   - a host `gh auth login` stored credentials for.
+func checkGhHost(cfg runConfig, host string) error {
+	allowed, cached := cfg.ghHosts[host]
+	if !cached {
+		allowed = isGitHubCloudHost(host) || strings.EqualFold(host, os.Getenv("GH_HOST")) || ghHasStoredToken(cfg, host)
+		if cfg.ghHosts != nil {
+			cfg.ghHosts[host] = allowed
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("%q is not a GitHub host gh is logged in to (run `gh auth login --hostname <host>`, or set GH_HOST for GitHub Enterprise Server)", host)
+	}
+	return nil
+}
+
+// isGitHubCloudHost reports whether host is operated by GitHub: github.com,
+// one of its subdomains, or a *.ghe.com tenant.
+func isGitHubCloudHost(host string) bool {
+	host = strings.ToLower(host)
+	return host == "github.com" || strings.HasSuffix(host, ".github.com") || strings.HasSuffix(host, ".ghe.com")
+}
+
+// ghHasStoredToken reports whether gh has credentials of its own for host,
+// from `gh auth login`. `gh auth token` is run without the token environment
+// variables, which would otherwise answer for any host. The token it prints
+// is discarded.
+func ghHasStoredToken(cfg runConfig, host string) bool {
+	args := []string{"auth", "token", "--hostname", host}
+	verboseLog(cfg, "gh", args)
+	ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd.Env = withoutEnvVars(os.Environ(), ghTokenEnvVars)
+	return cmd.Run() == nil
+}
+
+// withoutEnvVars returns env ("NAME=value" entries) without the variables in
+// names. Names are compared without regard to case, as Windows does.
+func withoutEnvVars(env, names []string) []string {
+	kept := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		if !slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(n, name) }) {
+			kept = append(kept, entry)
+		}
+	}
+	return kept
 }
 
 // sshTimeout bounds `ssh -G`, which only reads the SSH config.
