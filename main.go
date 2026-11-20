@@ -666,7 +666,13 @@ func getDefaultBranch(remote *Remote) (string, error) {
 		ref := strings.TrimSpace(string(output))
 		prefix := fmt.Sprintf("refs/remotes/%s/", remote.Name)
 		if strings.HasPrefix(ref, prefix) && refExists(ref) {
-			return strings.TrimPrefix(ref, prefix), nil
+			name := strings.TrimPrefix(ref, prefix)
+			// The remote chooses its HEAD, and ref names may start with
+			// "-"; git checkout would read such a name as an option.
+			if strings.HasPrefix(name, "-") {
+				return "", fmt.Errorf("default branch name '%s' starts with '-'", name)
+			}
+			return name, nil
 		}
 	}
 
