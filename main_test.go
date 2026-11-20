@@ -1602,6 +1602,25 @@ func TestRunIgnoresDanglingRemoteHead(t *testing.T) {
 	}
 }
 
+// TestRunRejectsDashDefaultBranch checks that a remote HEAD naming a branch
+// that starts with "-" stops gh-sync before anything is synced: the name
+// would reach `git checkout` as an option (-f discards local changes).
+func TestRunRejectsDashDefaultBranch(t *testing.T) {
+	f := newSyncFixture(t)
+	f.gitIn(f.remote, "update-ref", "refs/heads/-f", "refs/heads/main")
+	f.localGit("fetch", "--quiet", "origin")
+	f.localGit("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/-f")
+	before := f.sha(f.local, "main")
+	f.advanceUpstream("main", "upstream-1")
+
+	res := f.sync()
+	if res.err == nil {
+		t.Fatal("run() error = nil, want an error")
+	}
+	assertContains(t, "stderr", res.stderr, "default branch name '-f' starts with '-'")
+	f.assertBranchAt("main", before)
+}
+
 // TestRunPartialClone checks that a sync completes in a partial clone (#56).
 func TestRunPartialClone(t *testing.T) {
 	f := newSyncFixture(t)
